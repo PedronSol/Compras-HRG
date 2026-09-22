@@ -1,0 +1,25 @@
+# Núcleo da API
+Flask==3.1.3
+flask-sock==0.7.0
+simple-websocket==1.1.0
+Flask-Limiter==4.1.1
+python-dotenv==1.2.3
+tzdata==2026.4          # fuso America/Sao_Paulo (obrigatório no Windows)
+
+# Banco de dados (PostgreSQL >= 15)
+psycopg[binary]==3.3.6
+psycopg-pool==3.3.2
+
+# Segurança
+argon2-cffi==25.1.0
+cryptography==50.0.1
+
+# Documentos, OCR e relatórios
+reportlab==5.0.1
+pypdfium2==5.13.0
+pillow==12.3.0
+pytesseract==0.3.13
+rapidocr-onnxruntime==1.2.3
+
+# Servidor de produção (Linux)
+gunicorn==23.0.0; sys_platform != "win32"

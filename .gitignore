@@ -1,0 +1,17 @@
+# Ambiente Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Segredos e dados locais — nunca versionar
+backend/.env
+deploy/.env.producao
+backend/.pgdata/
+backend/storage/
+/storage/
+
+# Editor / SO
+.idea/
+Thumbs.db
+.DS_Store

@@ -1,0 +1,50 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "RG Hospital — iniciar (F5)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/backend/dev.py",
+      "cwd": "${workspaceFolder}/backend",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": { "PYTHONUNBUFFERED": "1" },
+      "serverReadyAction": {
+        "pattern": "RG Hospital em (https?://\\S+)",
+        "uriFormat": "%s",
+        "action": "openExternally"
+      }
+    },
+    {
+      "name": "RG Hospital — criar administrador",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/backend/dev.py",
+      "args": ["--criar-admin"],
+      "cwd": "${workspaceFolder}/backend",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "RG Hospital — somente o banco",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/backend/dev.py",
+      "args": ["--so-banco"],
+      "cwd": "${workspaceFolder}/backend",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "RG Hospital — testes (pytest)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-q"],
+      "cwd": "${workspaceFolder}/backend",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}

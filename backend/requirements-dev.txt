@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest==9.1.1
+# PostgreSQL embutido para a suíte de testes (não usar em produção)
+pgembed==0.2.0

@@ -1,0 +1,46 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "1. Instalar dependências (venv)",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe -m pip install -r backend/requirements-dev.txt",
+      "windows": {
+        "command": "if (-not (Test-Path .venv)) { python -m venv .venv }; .venv\\Scripts\\python.exe -m pip install -r backend/requirements-dev.txt",
+        "options": { "shell": { "executable": "powershell.exe", "args": ["-NoProfile", "-Command"] } }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "2. Iniciar plataforma (dev)",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe dev.py",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "panel": "dedicated" }
+    },
+    {
+      "label": "3. Criar administrador",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe dev.py --criar-admin",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Rodar testes",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe -m pytest -q",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Gerar marca (SVG + ícones PWA)",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe scripts/gerar_marca.py",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}

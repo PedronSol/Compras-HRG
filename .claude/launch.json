@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "rg-hospital",
+      "runtimeExecutable": "C:\\Users\\migue\\Desktop\\plataforma hotelaria\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["backend/dev.py"],
+      "port": 8000
+    }
+  ]
+}
