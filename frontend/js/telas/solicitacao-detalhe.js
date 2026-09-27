@@ -1,544 +1,493 @@
-// Detalhe da solicitação: workflow, ações por perfil, anexos com OCR, cotações, assinaturas e histórico.
+// Detalhe da solicitação: fluxo, decisões por perfil, itens, cotação (propostas manuais e mapa comparativo),
+// pedido e recebimentos, documentos, histórico e assinaturas eletrônicas.
 import { api } from "../api.js";
-import { estado, ouvir, rotulo } from "../estado.js";
-import { html, renderizar, on, seguro, dadosFormulario, mostrarErrosCampos, debounce } from "../ui/dom.js";
+import { estado, emitir, ouvir, rotulo } from "../estado.js";
+import { atualizarConsulta, navegar } from "../roteador.js";
+import { html, renderizar, on, seguro, debounce, dadosFormulario, mostrarErrosCampos } from "../ui/dom.js";
 import { icone } from "../ui/icones.js";
 import {
-  aviso, badgeSetor, badgeSla, badgeStatus, badgeUrgencia, comCarregamento, confirmar, formato, modal, opcoes,
-  toast, toastErro, erroTela,
+  abas, aviso, badgePedido, badgeRecebimento, badgeSetor, badgeSla, badgeStatus, badgeUrgencia, cabecalho,
+  comCarregamento, confirmar, fluxo, formato, modal, opcoes, pode, toast, toastErro, vazio,
 } from "../ui/componentes.js";
 import { ativarUpload, zonaUpload } from "../ui/upload.js";
+import { formularioFornecedor } from "./fornecedores.js";
 
-const CAMPOS_OCR = [
-  ["tipo_documento", "Tipo identificado", (v) => rotulo("tipo_documento", v)],
-  ["cnpj_emitente", "CNPJ do emitente"],
-  ["razao_social", "Razão social"],
-  ["numero_documento", "Número"],
-  ["data_emissao", "Emissão", formato.data],
-  ["valor_total", "Valor total", formato.moeda],
-  ["prazo_entrega_dias", "Prazo de entrega", (v) => `${v} dias`],
-  ["validade_dias", "Validade", (v) => `${v} dias`],
-  ["validade_data", "Válido até", formato.data],
-  ["condicoes_pagamento", "Pagamento"],
-  ["chave_acesso", "Chave de acesso NF-e"],
-  ["equipamento", "Equipamento"],
-  ["numero_serie", "Nº de série"],
-  ["patrimonio", "Patrimônio"],
-  ["data_calibracao", "Data da calibração", formato.data],
-  ["proxima_calibracao", "Próxima calibração", formato.data],
-  ["resultado_laudo", "Resultado", (v) => (v === "conforme" ? "Conforme" : "Não conforme")],
-];
+const ICONE_DECISAO = { aprovado: ["check_circulo", "sucesso"], reprovado: ["x_circulo", "perigo"], devolvido: ["devolver", "alerta"] };
 
-function confianca(c) {
-  const classe = c >= 0.8 ? "alta" : c >= 0.6 ? "media" : "baixa";
-  return html`<span class="confianca ${classe}" title="Confiança da extração">${Math.round(c * 100)}%</span>`;
-}
-
-export function painelOcr(a) {
-  if (a.ocr_status === "pendente" || a.ocr_status === "processando") {
-    return html`<p class="minusculo texto-3 linha-flex">${icone("atualizar", "girando")}Extraindo dados do documento (OCR)…</p>`;
-  }
-  if (a.ocr_status === "falhou" || a.ocr_status === "nao_suportado") {
-    return html`<p class="minusculo texto-3 linha-flex">${icone("alerta")}${a.ocr_erro || "Não foi possível extrair dados."}
-      ${a.ocr_status === "falhou" ? html`<button type="button" class="botao fantasma pequeno" data-reprocessar="${a.id}">Tentar novamente</button>` : ""}</p>`;
-  }
-  const d = a.dados_ocr || {};
-  const itens = CAMPOS_OCR.filter(([k]) => d[k]?.valor !== undefined && d[k]?.valor !== null);
-  return html`<details class="ocr-painel"><summary>${icone("ocr")}Dados extraídos por OCR (${itens.length} campos)</summary>
-    ${itens.length ? html`<dl class="ocr-campos">${itens.map(([k, r, fmt]) => html`<div><dt>${r}</dt><dd>${fmt ? fmt(d[k].valor) : d[k].valor}${confianca(d[k].confianca)}</dd></div>`)}</dl>`
-      : html`<p class="cartao-corpo pequeno texto-3">Nenhum campo estruturado identificado.</p>`}
-    ${(d.avisos || []).length ? html`<div class="cartao-corpo">${aviso("alerta", "Atenção", d.avisos.join(" "))}</div>` : ""}
-  </details>`;
-}
-
-function etapas(s) {
-  const st = s.status;
-  const ordem = { aguardando_adm: 1, necessita_nova_cotacao: 1, rejeitado_adm: 1, aprovado_adm: 2, em_cotacao: 2, aprovado: 4, rejeitado_compras: 2, cancelado: 0 };
-  const atual = ordem[st];
-  const passo = (i, titulo, detalhe) => {
-    let classe = "";
-    if (st === "cancelado") classe = i === 0 ? "feita" : "";
-    else if ((st === "rejeitado_adm" && i === 1) || (st === "rejeitado_compras" && i === 2)) classe = "recusada";
-    else if (i < atual || st === "aprovado") classe = "feita";
-    else if (i === atual) classe = "atual";
-    const simbolo = classe === "feita" ? icone("check") : classe === "recusada" ? icone("fechar") : seguro(String(i + 1));
-    return html`<li class="etapa ${classe}"><span class="bola">${simbolo}</span>${titulo}<small>${detalhe}</small></li>`;
-  };
-  return html`<ol class="etapas" aria-label="Etapas do fluxo de aprovação">
-    ${passo(0, "Gestor", "Solicitação assinada")}
-    ${passo(1, "Administração", st === "necessita_nova_cotacao" ? "Nova cotação solicitada" : "Análise de mérito")}
-    ${passo(2, "Compras", st === "em_cotacao" ? "Cotação em andamento" : "Cotação e fornecedores")}
-    ${passo(3, "Homologação", st === "aprovado" ? "Concluída" : "Assinatura final")}
-  </ol>`;
-}
-
-function marcadorHistorico(h) {
-  if (["aprovado", "aprovado_adm"].includes(h.status_para) && h.acao === "mudanca_status") return "sucesso";
-  if (["rejeitado_adm", "rejeitado_compras", "cancelado"].includes(h.status_para) && h.acao === "mudanca_status") return "perigo";
-  if (h.status_para === "necessita_nova_cotacao" || h.acao === "alteracao_urgencia") return "alerta";
-  return "";
-}
-
-function tituloHistorico(h) {
-  if (h.acao === "criacao") return "Solicitação criada e assinada";
-  if (h.acao === "alteracao_urgencia") return "Urgência reclassificada";
-  if (h.acao === "edicao") return "Conteúdo revisado";
-  return `${rotulo("status_solicitacao", h.status_de)} → ${rotulo("status_solicitacao", h.status_para)}`;
-}
-
-export async function montar({ raiz, params }) {
-  let dados = null;
-  let modalAberto = false;
-  const id = params.id;
-
-  async function carregar() {
-    try {
-      dados = await api.get(`/solicitacoes/${id}`);
-      desenhar();
-    } catch (e) {
-      raiz.replaceChildren(erroTela(e, carregar));
+function movimentacao(h) {
+  const st = (v) => rotulo(h.acao === "pedido_status" ? "status_pedido" : "status_solicitacao", v);
+  switch (h.acao) {
+    case "criacao": return ["Solicitação aberta e assinada", "documento", "info"];
+    case "edicao": return ["Conteúdo ajustado pelo setor", "editar", ""];
+    case "pedido_emitido": return ["Pedido de compra emitido", "pedido", "info"];
+    case "recebimento": return [`Recebimento registrado · ${rotulo("situacao_recebimento", h.status_para)}`, "caminhao", h.status_para === "conforme" ? "sucesso" : "alerta"];
+    case "pedido_status": return [`Pedido: ${st(h.status_de)} → ${st(h.status_para)}`, "pedido", ["reprovado", "cancelado"].includes(h.status_para) ? "perigo" : h.status_para === "entregue" ? "sucesso" : "info"];
+    default: {
+      const tom = ["reprovada", "cancelada"].includes(h.status_para) ? "perigo" : h.status_para === "devolvida" ? "alerta" : ["aprovada", "concluida", "aguardando_pedido"].includes(h.status_para) ? "sucesso" : "info";
+      return [`${st(h.status_de)} → ${st(h.status_para)}`, tom === "perigo" ? "x_circulo" : tom === "alerta" ? "devolver" : "seta_direita", tom];
     }
   }
+}
 
-  function desenhar() {
-    const { solicitacao: s, anexos, cotacoes, assinaturas, historico, acoes } = dados;
-    document.title = `${s.codigo} · ${estado.meta.instituicao}`;
-    const ativos = anexos.filter((a) => !a.removido_em);
-    const removidos = anexos.filter((a) => a.removido_em);
-    const pareceres = [
-      ["info", "Parecer da Administração", s.justificativa_adm, ["aprovado_adm", "em_cotacao", "aprovado", "rejeitado_compras"].includes(s.status) ? "info" : "perigo"],
-      ["alerta", "Nova cotação solicitada", s.status === "necessita_nova_cotacao" ? s.motivo_nova_cotacao : null],
-      ["alerta", "Urgência reclassificada pela Administração", s.justificativa_urgencia],
-      ["info", "Parecer de Compras", s.justificativa_compras, s.status === "rejeitado_compras" ? "perigo" : "sucesso"],
-      ["perigo", "Motivo do cancelamento", s.motivo_cancelamento],
-    ].filter((p) => p[2]);
+// ------------------------------------------------------------------ blocos
+function blocoDecisao(d) {
+  const s = d.solicitacao;
+  const nivel = s.status === "aguardando_gestor" ? "Gestor do setor" : "Diretoria";
+  return html`<section class="cartao destaque" aria-labelledby="t-decisao">
+    <div class="cartao-cabecalho"><h2 id="t-decisao">${icone("carimbo")}Sua decisão · ${nivel}</h2></div>
+    <form class="cartao-corpo painel-decisao" id="form-decisao" novalidate>
+      <dl class="pares lista"><div><dt>Valor estimado</dt><dd class="num"><strong>${formato.moeda(s.valor_estimado)}</strong></dd></div>
+        <div><dt>Alçada da Diretoria</dt><dd class="num">${formato.moeda(d.alcada_diretoria)}</dd></div></dl>
+      ${s.status === "aguardando_gestor" && Number(s.valor_estimado) >= Number(d.alcada_diretoria) ? aviso("info", "Após sua aprovação, segue para a Diretoria", "O valor estimado está acima da alçada.") : ""}
+      <div class="campo"><label for="parecer">Parecer <span class="texto-3">(obrigatório para devolver ou reprovar)</span></label>
+        <textarea id="parecer" name="texto" maxlength="2000" placeholder="Registre sua análise. Ao devolver, indique exatamente o que deve ser ajustado."></textarea></div>
+      <div class="botoes-decisao">
+        <button type="button" class="botao sucesso" data-decisao="aprovar">${icone("check")}Aprovar</button>
+        <button type="button" class="botao alerta" data-decisao="devolver">${icone("devolver")}Devolver</button>
+        <button type="button" class="botao perigo-suave" data-decisao="reprovar">${icone("x_circulo")}Reprovar</button>
+      </div>
+      <p class="minusculo texto-3">Sua decisão é registrada com assinatura eletrônica (usuário, data/hora e IP).</p>
+    </form></section>`;
+}
+
+function blocoDados(s) {
+  return html`<section class="cartao"><div class="cartao-cabecalho"><h2>${icone("info")}Dados da solicitação</h2></div>
+    <div class="cartao-corpo"><dl class="pares lista">
+      <div><dt>Solicitante</dt><dd>${s.solicitante_nome}</dd></div>
+      <div><dt>Setor</dt><dd>${badgeSetor(s.setor_codigo, s.setor_nome, s.setor_cor)}</dd></div>
+      <div><dt>Tipo</dt><dd>${rotulo("tipo_solicitacao", s.tipo)}</dd></div>
+      <div><dt>Urgência</dt><dd>${badgeUrgencia(s.urgencia)}</dd></div>
+      <div><dt>Aberta em</dt><dd>${formato.dataHora(s.criado_em)}</dd></div>
+      <div><dt>Necessário até</dt><dd>${formato.data(s.data_necessidade)}</dd></div>
+      <div><dt>Local de entrega</dt><dd>${s.local_entrega || "—"}</dd></div>
+      <div><dt>Prazo de atendimento</dt><dd>${badgeSla(s.sla_situacao, s.sla_horas_restantes)}<br><small class="texto-3">${formato.dataHora(s.sla_prazo_limite)}</small></dd></div>
+      <div><dt>Comprador</dt><dd>${s.comprador_nome || "—"}</dd></div>
+      <div><dt>Valor estimado</dt><dd class="num">${formato.moeda(s.valor_estimado)}</dd></div>
+      <div><dt>Valor contratado</dt><dd class="num"><strong>${formato.moeda(s.valor_final)}</strong>${s.valor_final && s.valor_estimado ? html`<br><small class="${Number(s.valor_final) <= Number(s.valor_estimado) ? "texto-3" : "texto-3"}">${Number(s.valor_final) <= Number(s.valor_estimado) ? `economia de ${formato.moeda(s.valor_estimado - s.valor_final)}` : `${formato.moeda(s.valor_final - s.valor_estimado)} acima do estimado`}</small>` : ""}</dd></div>
+      <div><dt>Rodada</dt><dd>${s.rodada}ª</dd></div>
+    </dl></div></section>`;
+}
+
+function blocoAprovacoes(d) {
+  return html`<section class="cartao"><div class="cartao-cabecalho"><h2>${icone("carimbo")}Aprovações</h2></div>
+    ${d.aprovacoes.length ? html`<ul class="lista-itens">${d.aprovacoes.map((a) => { const [ic, tom] = ICONE_DECISAO[a.decisao]; return html`<li><div class="item-lista">
+      <span class="icone-item ${tom}">${icone(ic)}</span><span class="corpo-item"><strong>${rotulo("nivel_aprovacao", a.nivel)} · ${rotulo("decisao_aprovacao", a.decisao)}</strong>
+      <small>${a.usuario_nome} · ${formato.dataHora(a.criado_em)}</small>${a.parecer ? html`<small title="${a.parecer}">“${a.parecer}”</small>` : ""}</span></div></li>`; })}</ul>`
+      : vazio("Nenhuma decisão registrada", d.solicitacao.status === "aguardando_gestor" ? "Aguardando o gestor do setor." : d.solicitacao.status === "aguardando_diretoria" ? "Aguardando a Diretoria." : "", "", "carimbo", true)}
+  </section>`;
+}
+
+function tabelaItens(d) {
+  return html`<div class="tabela-envoltorio"><table class="tabela responsiva">
+    <thead><tr><th>#</th><th>Item</th><th class="num">Quantidade</th><th class="num">Unitário estimado</th><th class="num">Total estimado</th></tr></thead>
+    <tbody>${d.itens.map((i, n) => html`<tr><td data-rotulo="Item" class="texto-3">${n + 1}</td>
+      <td class="principal-td"><div class="principal-celula"><strong>${i.descricao}</strong><small>${i.material_codigo ? html`<span class="mono">${i.material_codigo}</span> · catálogo` : "Item livre"}${i.observacao ? ` · ${i.observacao}` : ""}</small></div></td>
+      <td data-rotulo="Quantidade" class="num">${formato.numero(i.quantidade)} ${i.unidade}</td>
+      <td data-rotulo="Unitário" class="num">${formato.moeda(i.valor_unitario_estimado)}</td>
+      <td data-rotulo="Total" class="num"><strong>${formato.moeda(i.total_estimado)}</strong></td></tr>`)}</tbody>
+    <tfoot><tr><td colspan="4">Total estimado</td><td class="num">${formato.moeda(d.solicitacao.valor_estimado)}</td></tr></tfoot></table></div>`;
+}
+
+function mapaComparativo(d) {
+  const { cotacoes: cot, comparacao: comp, itens } = d;
+  const s = d.solicitacao;
+  const podeEditar = d.acoes.includes("propostas");
+  const podeEscolher = d.acoes.includes("definir_fornecedor");
+  const ordem = comp.ranking.map((id) => cot.find((c) => c.id === id)).filter(Boolean);
+  const menorTotal = comp.menor_total !== null ? Number(comp.menor_total) : null;
+  const marcaMenor = html`<span class="marca-menor" title="Menor valor">${icone("check")}<span class="sr-only">Menor valor:</span></span>`;
+  const menorItem = (p, l) => Number(p.valor_unitario) === Number(l.menor_unitario) && Object.keys(l.precos).length > 1;
+  const menorGlobal = (c) => ordem.length > 1 && menorTotal !== null && Number(c.valor_total) === menorTotal && c.itens.length >= itens.length;
+  const anexo = (id) => d.anexos.find((a) => a.id === id);
+  return html`<div class="tabela-envoltorio"><table class="comparacao">
+    <thead><tr><th scope="col">Item</th>${ordem.map((c, i) => html`<th scope="col" class="${c.selecionada ? "vencedora" : ""}"><div class="forn-cab">
+      ${c.selecionada ? html`<span class="badge sucesso">${icone("estrela")}Vencedora</span>` : i === 0 && menorTotal !== null && Number(c.valor_total) === menorTotal ? html`<span class="badge primaria">Menor preço</span>` : ""}
+      <strong>${c.nome_fantasia || c.razao_social}</strong><small class="mono">${formato.cnpj(c.cnpj)}</small>
+      ${c.numero_proposta ? html`<small>Proposta ${c.numero_proposta}</small>` : ""}</div></th>`)}</tr></thead>
+    <tbody>${comp.linhas.map((l) => html`<tr><td><strong>${l.descricao}</strong><span class="sub-cell">${formato.numero(l.quantidade)} ${l.unidade} · estimado ${formato.moeda(l.estimado)}</span></td>
+      ${ordem.map((c) => { const p = l.precos[c.id]; return p
+        ? html`<td class="${menorItem(p, l) ? "menor" : ""} ${c.selecionada ? "vencedora" : ""}">${menorItem(p, l) ? marcaMenor : ""}${formato.moeda(p.valor_unitario)}<span class="sub-cell">${formato.moeda(p.total)}${p.marca ? ` · ${p.marca}` : ""}</span></td>`
+        : html`<td class="ausente ${c.selecionada ? "vencedora" : ""}">não cotado</td>`; })}</tr>`)}</tbody>
+    <tfoot>
+      <tr><td>Frete</td>${ordem.map((c) => html`<td class="${c.selecionada ? "vencedora" : ""}">${formato.moeda(c.frete)}</td>`)}</tr>
+      <tr><td>Desconto</td>${ordem.map((c) => html`<td class="${c.selecionada ? "vencedora" : ""}">${Number(c.desconto) ? `− ${formato.moeda(c.desconto)}` : "—"}</td>`)}</tr>
+      <tr class="total"><td>Valor total</td>${ordem.map((c) => html`<td class="${menorGlobal(c) ? "menor" : ""} ${c.selecionada ? "vencedora" : ""}">${menorGlobal(c) ? marcaMenor : ""}${formato.moeda(c.valor_total)}</td>`)}</tr>
+      <tr><td>Prazo de entrega</td>${ordem.map((c) => html`<td class="${c.selecionada ? "vencedora" : ""}">${c.prazo_entrega_dias} dias${Number(c.prazo_entrega_dias) === Number(comp.melhor_prazo) && ordem.length > 1 ? html`<span class="sub-cell">melhor prazo</span>` : ""}</td>`)}</tr>
+      <tr><td>Pagamento</td>${ordem.map((c) => html`<td class="${c.selecionada ? "vencedora" : ""}">${c.condicoes_pagamento || "—"}</td>`)}</tr>
+      <tr><td>Validade</td>${ordem.map((c) => html`<td class="${c.selecionada ? "vencedora" : ""}">${formato.data(c.validade_proposta)}</td>`)}</tr>
+      <tr><td>Documento</td>${ordem.map((c) => { const a = anexo(c.anexo_id); return html`<td class="${c.selecionada ? "vencedora" : ""}">${a ? html`<button class="botao fantasma pequeno" data-ver-anexo="${a.id}">${icone("olho")}Ver</button>` : html`<span class="texto-3">—</span>`}</td>`; })}</tr>
+      ${podeEditar || podeEscolher ? html`<tr><td></td>${ordem.map((c) => html`<td class="${c.selecionada ? "vencedora" : ""}"><div class="grupo-botoes">
+        ${podeEscolher ? html`<button class="botao sucesso pequeno" data-escolher="${c.id}" ${c.itens.length < itens.length ? seguro('disabled title="Proposta não cota todos os itens"') : ""}>${icone("estrela")}Escolher</button>` : ""}
+        ${podeEditar ? html`<button class="botao fantasma pequeno icone" data-editar-proposta="${c.id}" aria-label="Editar proposta">${icone("editar")}</button>
+          <button class="botao fantasma pequeno icone" data-remover-proposta="${c.id}" aria-label="Remover proposta">${icone("lixeira")}</button>` : ""}</div></td>`)}</tr>` : ""}
+    </tfoot></table></div>
+    ${s.justificativa_escolha ? html`<div class="cartao-corpo">${aviso("info", "Justificativa da escolha do fornecedor", s.justificativa_escolha)}</div>` : ""}`;
+}
+
+function abaCotacao(d) {
+  const s = d.solicitacao;
+  const comp = d.comparacao;
+  if (["aguardando_gestor", "aguardando_diretoria", "devolvida", "reprovada"].includes(s.status) || (s.status === "cancelada" && !s.cotacao_iniciada_em)) {
+    return html`<section class="cartao">${vazio("Cotação ainda não disponível", "A cotação começa depois que a solicitação é aprovada.", "", "balanca")}</section>`;
+  }
+  if (s.status === "aprovada") {
+    return html`<section class="cartao">${vazio("Aguardando o comprador iniciar a cotação", "Assim que iniciada, as propostas dos fornecedores aparecerão aqui para comparação.",
+      d.acoes.includes("iniciar_cotacao") ? html`<button class="botao" data-acao="iniciar_cotacao">${icone("play")}Iniciar cotação</button>` : "", "balanca")}</section>`;
+  }
+  return html`<section class="cartao">
+    <div class="cartao-cabecalho"><h2>${icone("balanca")}Mapa comparativo de propostas</h2>
+      <span class="badge ${comp.abaixo_do_minimo ? "alerta" : "sucesso"}">${d.cotacoes.length} de ${comp.minimo_cotacoes} propostas mínimas</span>
+      ${d.acoes.includes("propostas") ? html`<button class="botao" data-nova-proposta>${icone("mais")}Registrar proposta</button>` : ""}</div>
+    ${d.cotacoes.length ? mapaComparativo(d) : vazio("Nenhuma proposta registrada", d.acoes.includes("propostas") ? "Anexe ou fotografe o orçamento recebido e digite os valores de cada item." : "O comprador ainda não registrou propostas.",
+      d.acoes.includes("propostas") ? html`<button class="botao" data-nova-proposta>${icone("mais")}Registrar primeira proposta</button>` : "", "balanca")}
+    ${d.acoes.includes("propostas") ? html`<div class="cartao-corpo"><p class="nota-privacidade">${icone("escudo")}<span>Os valores são digitados pelo comprador a partir do orçamento anexado. O sistema não lê nem interpreta documentos automaticamente.</span></p></div>` : ""}
+  </section>`;
+}
+
+function abaPedido(d) {
+  if (!d.pedidos.length) return html`<section class="cartao">${vazio("Nenhum pedido de compra emitido", d.acoes.includes("emitir_pedido") ? "O fornecedor já foi definido. Emita o pedido para seguir à aprovação financeira." : "O pedido é emitido pelo comprador após a definição do fornecedor.",
+    d.acoes.includes("emitir_pedido") ? html`<button class="botao" data-acao="emitir_pedido">${icone("pedido")}Emitir pedido de compra</button>` : "", "pedido")}</section>`;
+  return html`<div class="pilha">${d.pedidos.map((p) => html`<section class="cartao">
+    <div class="cartao-cabecalho"><h2>${icone("pedido")}${p.codigo}</h2>${badgePedido(p.status, true)}${p.atrasado ? html`<span class="badge perigo">${icone("alerta")}Atrasado ${p.dias_atraso} dia(s)</span>` : ""}
+      <a class="botao secundario pequeno" href="/pedidos/${p.id}">Abrir pedido${icone("seta_dir")}</a></div>
+    <div class="cartao-corpo"><dl class="pares">
+      <div><dt>Fornecedor</dt><dd>${p.fornecedor_fantasia || p.fornecedor_nome}</dd></div>
+      <div><dt>Valor total</dt><dd class="num"><strong>${formato.moeda(p.valor_total)}</strong></dd></div>
+      <div><dt>Emissão</dt><dd>${formato.dataHora(p.criado_em)}</dd></div>
+      <div><dt>Previsão de entrega</dt><dd>${formato.data(p.data_prevista_entrega)}</dd></div>
+      <div><dt>Recebido</dt><dd><div class="progresso-rotulado"><div class="progresso sucesso"><span data-largura="${p.percentual_recebido}"></span></div>${p.percentual_recebido}%</div></dd></div>
+    </dl></div></section>`)}
+    ${d.recebimentos.length ? html`<section class="cartao"><div class="cartao-cabecalho"><h2>${icone("caminhao")}Recebimentos</h2></div>
+      <div class="tabela-envoltorio"><table class="tabela responsiva"><thead><tr><th>Recebimento</th><th>Nota fiscal</th><th>Conferente</th><th>Situação</th><th>Data</th></tr></thead>
+      <tbody>${d.recebimentos.map((r) => html`<tr><td class="principal-td"><div class="principal-celula"><strong>${r.codigo}</strong><small>${r.pedido_codigo}</small></div></td>
+        <td data-rotulo="Nota fiscal">NF ${r.nota_fiscal}${r.valor_nf ? html`<br><small class="texto-3">${formato.moeda(r.valor_nf)}</small>` : ""}</td><td data-rotulo="Conferente">${r.recebido_por_nome}</td>
+        <td data-rotulo="Situação">${badgeRecebimento(r.situacao)}${r.observacoes ? html`<br><small class="texto-3">${r.observacoes}</small>` : ""}</td><td data-rotulo="Data" class="nowrap">${formato.dataHora(r.recebido_em)}</td></tr>`)}</tbody></table></div></section>` : ""}
+  </div>`;
+}
+
+function abaDocumentos(d) {
+  const ativos = d.anexos.filter((a) => !a.removido_em);
+  const removidos = d.anexos.filter((a) => a.removido_em);
+  const origem = { solicitante: "Setor solicitante", comprador: "Compras", recebimento: "Recebimento" };
+  const podeAnexar = d.acoes.includes("anexar");
+  return html`<section class="cartao"><div class="cartao-cabecalho"><h2>${icone("anexo")}Documentos</h2><span class="pequeno texto-3">Armazenados cifrados · integridade por SHA-256</span></div>
+    <div class="cartao-corpo pilha">
+      ${ativos.length ? html`<ul class="lista-arquivos">${ativos.map((a) => html`<li class="arquivo">
+        <span class="icone-arquivo">${icone(a.mime === "application/pdf" ? "pdf" : a.mime.startsWith("image/") ? "camera" : "documento")}</span>
+        <span class="info-arquivo"><span class="nome">${a.nome_original}</span><span class="meta">${rotulo("tipo_documento", a.tipo_documento)} · ${origem[a.origem]} · ${a.enviado_por_nome} · ${formato.dataHora(a.criado_em)} · ${formato.tamanho(a.tamanho)}</span></span>
+        <span class="acoes">${["application/pdf", "image/png", "image/jpeg", "image/webp"].includes(a.mime) ? html`<button class="botao fantasma pequeno icone" data-ver-anexo="${a.id}" aria-label="Visualizar ${a.nome_original}">${icone("olho")}</button>` : ""}
+          <button class="botao fantasma pequeno icone" data-baixar-anexo="${a.id}" aria-label="Baixar ${a.nome_original}">${icone("download")}</button>
+          ${podeAnexar && a.origem !== "recebimento" && (a.origem === "solicitante" ? ["solicitante", "gestor"].includes(estado.usuario.papel) : estado.usuario.papel === "comprador") ? html`<button class="botao fantasma pequeno icone" data-remover-anexo="${a.id}" aria-label="Remover ${a.nome_original}">${icone("lixeira")}</button>` : ""}</span></li>`)}</ul>`
+        : vazio("Nenhum documento anexado", "", "", "anexo", true)}
+      ${removidos.length ? html`<details><summary class="pequeno texto-3">${removidos.length} documento(s) removido(s) — mantidos para auditoria</summary><ul class="lista-arquivos">${removidos.map((a) => html`<li class="arquivo removido"><span class="icone-arquivo">${icone("documento")}</span><span class="info-arquivo"><span class="nome">${a.nome_original}</span><span class="meta">removido em ${formato.dataHora(a.removido_em)}</span></span></li>`)}</ul></details>` : ""}
+      ${podeAnexar ? html`<form id="form-anexo" class="pilha" novalidate>${zonaUpload({ id: "novos-anexos", max: 5, rotulo: "Anexar ou fotografar documentos" })}
+        <div class="linha-flex"><select class="entrada" name="tipo_documento" aria-label="Tipo de documento">${opcoes(estado.usuario.papel === "comprador" ? { proposta: "Proposta comercial", orcamento: "Orçamento", laudo: "Laudo / certificado", foto: "Fotografia", outro: "Outro" } : { orcamento: "Orçamento", laudo: "Laudo / certificado", foto: "Fotografia", outro: "Outro" }, "")}</select>
+        <button class="botao" type="submit">${icone("upload")}Enviar documentos</button></div></form>` : ""}
+    </div></section>`;
+}
+
+function abaHistorico(d) {
+  return html`<div class="grade-2">
+    <section class="cartao"><div class="cartao-cabecalho"><h2>${icone("historico")}Histórico de movimentações</h2></div>
+      <div class="cartao-corpo"><ol class="linha-tempo">${[...d.historico].reverse().map((h) => { const [t, ic, tom] = movimentacao(h); return html`<li>
+        <span class="icone-t ${tom}">${icone(ic)}</span><div><div class="t-titulo">${t}</div>
+        <div class="t-meta">${h.autor_nome || "Sistema"}${h.autor_papel ? ` · ${rotulo("papel", h.autor_papel)}` : ""} · ${formato.dataHora(h.criado_em)}</div>
+        ${h.observacao ? html`<div class="t-obs">${h.observacao}</div>` : ""}</div></li>`; })}</ol></div></section>
+    <section class="cartao"><div class="cartao-cabecalho"><h2>${icone("assinatura")}Assinaturas eletrônicas</h2><span class="subtitulo">HMAC-SHA-256 sobre usuário, data/hora, IP, ação e conteúdo</span></div>
+      ${d.assinaturas.length ? html`<div>${d.assinaturas.map((a) => html`<div class="assinatura">
+        <span class="selo-ass">${icone("assinatura")}</span>
+        <div><strong class="pequeno">${rotulo("acao_assinatura", a.acao)}</strong><div class="minusculo texto-3">${a.usuario_nome} · ${rotulo("papel", a.papel)} · ${formato.dataHora(a.assinado_em)} · IP ${a.ip}</div>
+          <div class="mono-hash">${a.hash_autenticidade}</div></div>
+        <button class="botao secundario pequeno" data-verificar="${a.id}">${icone("escudo")}Verificar</button></div>`)}</div>`
+        : vazio("Nenhuma assinatura", "", "", "assinatura", true)}</section>
+  </div>`;
+}
+
+// ------------------------------------------------------------------ modais de ação
+async function modalProposta(d, cotacao = null, aoSalvar) {
+  const fornecedores = (await api.get("/fornecedores", { ativos: 1, por_pagina: 500, ordem: "nome" })).itens;
+  const usados = new Set(d.cotacoes.map((c) => c.fornecedor_id));
+  const docs = d.anexos.filter((a) => !a.removido_em);
+  const precoDe = (itemId) => cotacao?.itens.find((i) => String(i.solicitacao_item_id) === String(itemId));
+  const m = modal({
+    titulo: cotacao ? `Editar proposta · ${cotacao.nome_fantasia || cotacao.razao_social}` : "Registrar proposta de fornecedor",
+    sub: "Digite os dados exatamente como constam no orçamento recebido.", tamanho: "extra",
+    conteudo: html`<form id="form-prop" class="pilha" novalidate>
+      <div class="form-grade">
+        ${cotacao ? "" : html`<div class="campo col-8" data-campo="fornecedor_id"><label for="p-forn">Fornecedor<span class="obrigatorio">*</span></label>
+          <div class="linha-flex"><select id="p-forn" name="fornecedor_id" class="entrada" required>${opcoes(Object.fromEntries(fornecedores.filter((f) => !usados.has(f.id)).map((f) => [f.id, `${f.nome_fantasia || f.razao_social} · ${formato.cnpj(f.cnpj)}`])), "", { vazio: "Selecione o fornecedor…" })}</select>
+          ${pode("fornecedor.gerenciar") ? html`<button type="button" class="botao secundario" data-novo-forn>${icone("mais")}Novo</button>` : ""}</div></div>`}
+        <div class="campo ${cotacao ? "col-4" : "col-4"}"><label for="p-num">Nº da proposta</label><input id="p-num" name="numero_proposta" maxlength="60" value="${cotacao?.numero_proposta || ""}"></div>
+        <div class="campo col-3"><label for="p-data">Data da proposta</label><input id="p-data" name="data_proposta" type="date" value="${cotacao?.data_proposta || formato.hojeISO()}"></div>
+        <div class="campo col-3"><label for="p-val">Válida até</label><input id="p-val" name="validade_proposta" type="date" value="${cotacao?.validade_proposta || formato.isoDias(15)}"></div>
+        <div class="campo col-3"><label for="p-prazo">Prazo de entrega (dias)<span class="obrigatorio">*</span></label><input id="p-prazo" name="prazo_entrega_dias" type="number" min="0" max="3650" required value="${cotacao?.prazo_entrega_dias ?? ""}"></div>
+        <div class="campo col-3"><label for="p-pag">Condições de pagamento</label><input id="p-pag" name="condicoes_pagamento" maxlength="300" list="lista-pag" value="${cotacao?.condicoes_pagamento || ""}"><datalist id="lista-pag"><option value="28 dias"><option value="30 dias"><option value="30/60 dias"><option value="30/60/90 dias"><option value="À vista"></datalist></div>
+        <div class="campo col-3"><label for="p-frete">Frete</label><div class="entrada-prefixo"><span>R$</span><input id="p-frete" name="frete" inputmode="decimal" value="${formato.entradaDecimal(cotacao?.frete || 0)}"></div></div>
+        <div class="campo col-3"><label for="p-desc">Desconto</label><div class="entrada-prefixo"><span>R$</span><input id="p-desc" name="desconto" inputmode="decimal" value="${formato.entradaDecimal(cotacao?.desconto || 0)}"></div></div>
+        <div class="campo col-6"><label for="p-doc">Documento da proposta</label><select id="p-doc" name="anexo_id">${opcoes(Object.fromEntries(docs.map((a) => [a.id, `${a.nome_original} (${rotulo("tipo_documento", a.tipo_documento)})`])), cotacao?.anexo_id || "", { vazio: "Nenhum" })}</select>
+          <p class="ajuda">Anexe ou fotografe o orçamento abaixo, ou selecione um já anexado.</p></div>
+        <div class="campo col-6"><span class="rotulo">Anexar orçamento agora</span><div class="linha-flex">
+          <label class="botao secundario pequeno">${icone("upload")}Selecionar arquivo<input type="file" class="sr-only" data-doc-prop accept=".pdf,.png,.jpg,.jpeg,.webp"></label>
+          <label class="botao secundario pequeno">${icone("camera")}Fotografar<input type="file" class="sr-only" data-doc-prop accept="image/*" capture="environment"></label></div></div>
+      </div>
+      <div data-campo="itens"><p class="grupo-titulo-secao">Preços por item</p>
+        <div class="tabela-envoltorio"><table class="tabela densa responsiva"><thead><tr><th>Item solicitado</th><th class="num">Qtd. solicitada</th><th>Qtd. cotada</th><th>Valor unitário</th><th>Marca / modelo</th><th class="num">Total</th><th>Não cotado</th></tr></thead>
+        <tbody>${d.itens.map((i) => { const p = precoDe(i.id); const ausente = cotacao && !p; return html`<tr data-item="${i.id}">
+          <td class="principal-td"><div class="principal-celula"><strong>${i.descricao}</strong><small>Estimado ${formato.moeda(i.valor_unitario_estimado)} / ${i.unidade}</small></div></td>
+          <td data-rotulo="Solicitado" class="num">${formato.numero(i.quantidade)} ${i.unidade}</td>
+          <td data-rotulo="Qtd. cotada"><input class="entrada num" name="qtd" inputmode="decimal" aria-label="Quantidade cotada" value="${formato.numero(p?.quantidade ?? i.quantidade)}" ${ausente ? seguro("disabled") : ""}></td>
+          <td data-rotulo="Unitário"><div class="entrada-prefixo"><span>R$</span><input class="entrada num" name="unit" inputmode="decimal" aria-label="Valor unitário" placeholder="0,00" value="${p ? formato.entradaDecimal(p.valor_unitario) : ""}" ${ausente ? seguro("disabled") : ""}></div></td>
+          <td data-rotulo="Marca"><input class="entrada" name="marca" maxlength="120" aria-label="Marca" value="${p?.marca || ""}" ${ausente ? seguro("disabled") : ""}></td>
+          <td data-rotulo="Total" class="num" data-total>—</td>
+          <td data-rotulo="Não cotado"><input type="checkbox" name="ausente" aria-label="Item não cotado" ${ausente ? seguro("checked") : ""}></td></tr>`; })}</tbody></table></div>
+        <div class="resumo-total"><span class="texto-3">Total da proposta (itens + frete − desconto)</span><span class="valor-total" data-total-prop>R$ 0,00</span></div>
+      </div>
+      <div class="campo"><label for="p-obs">Observações</label><textarea id="p-obs" name="observacoes" maxlength="2000">${cotacao?.observacoes || ""}</textarea></div>
+    </form>`,
+    rodape: html`<button class="botao secundario" data-fechar>Cancelar</button><button class="botao" type="submit" form="form-prop">${icone("check")}Salvar proposta</button>`,
+  });
+  const form = m.el.querySelector("#form-prop");
+  const recalcular = () => {
+    let total = 0;
+    form.querySelectorAll("tr[data-item]").forEach((tr) => {
+      const aus = tr.querySelector('[name="ausente"]').checked;
+      tr.querySelectorAll('input:not([type="checkbox"])').forEach((x) => { x.disabled = aus; });
+      const t = aus ? 0 : formato.lerDecimal(tr.querySelector('[name="qtd"]').value) * formato.lerDecimal(tr.querySelector('[name="unit"]').value);
+      tr.querySelector("[data-total]").textContent = t ? formato.moeda(t) : "—";
+      total += t;
+    });
+    total += formato.lerDecimal(form.frete.value) - formato.lerDecimal(form.desconto.value);
+    m.el.querySelector("[data-total-prop]").textContent = formato.moeda(Math.max(0, total));
+  };
+  form.addEventListener("input", recalcular);
+  form.addEventListener("change", recalcular);
+  recalcular();
+  m.el.querySelector("[data-novo-forn]")?.addEventListener("click", async () => {
+    const f = await formularioFornecedor();
+    if (!f) return;
+    const sel = form.fornecedor_id;
+    sel.insertAdjacentHTML("beforeend", html`<option value="${f.id}">${f.nome_fantasia || f.razao_social} · ${formato.cnpj(f.cnpj)}</option>`.toString());
+    sel.value = f.id;
+  });
+  form.querySelectorAll("[data-doc-prop]").forEach((input) => input.addEventListener("change", async () => {
+    const arq = input.files[0];
+    if (!arq) return;
+    const fd = new FormData();
+    fd.append("tipo_documento", "proposta");
+    fd.append("arquivos", arq, arq.type.startsWith("image/") && input.hasAttribute("capture") ? `foto-proposta-${Date.now()}.jpg` : arq.name);
+    try {
+      const r = await api.enviarFormulario(`/solicitacoes/${d.solicitacao.id}/anexos`, fd);
+      const novo = r.anexos.find((a) => a.id === r.anexos_criados[0]);
+      form.anexo_id.insertAdjacentHTML("beforeend", html`<option value="${novo.id}">${novo.nome_original} (Proposta comercial)</option>`.toString());
+      form.anexo_id.value = novo.id;
+      toast("sucesso", "Documento anexado", "Agora digite os valores da proposta.");
+      aoSalvar?.(r, false);
+    } catch (e) { toastErro(e); }
+    input.value = "";
+  }));
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const dados = dadosFormulario(form);
+    const itens = [...form.querySelectorAll("tr[data-item]")].filter((tr) => !tr.querySelector('[name="ausente"]').checked).map((tr) => ({
+      solicitacao_item_id: tr.dataset.item,
+      quantidade: String(formato.lerDecimal(tr.querySelector('[name="qtd"]').value)),
+      valor_unitario: String(formato.lerDecimal(tr.querySelector('[name="unit"]').value)),
+      marca: tr.querySelector('[name="marca"]').value.trim() || undefined,
+      _vazio: !tr.querySelector('[name="unit"]').value.trim(),
+    }));
+    const erros = {};
+    if (!cotacao && !dados.fornecedor_id) erros.fornecedor_id = "Selecione o fornecedor";
+    if (dados.prazo_entrega_dias === "") erros.prazo_entrega_dias = "Informe o prazo";
+    if (!itens.length) erros.itens = "Informe o preço de ao menos um item";
+    else if (itens.some((i) => i._vazio)) erros.itens = "Preencha o valor unitário de todos os itens cotados (ou marque “não cotado”)";
+    mostrarErrosCampos(form, erros);
+    if (Object.keys(erros).length) return;
+    const corpo = { ...dados, itens: itens.map(({ _vazio, ...i }) => i) };
+    delete corpo.qtd; delete corpo.unit; delete corpo.marca; delete corpo.ausente;
+    try {
+      const r = await comCarregamento(m.el.querySelector('[type="submit"]'), cotacao ? api.put(`/propostas/${cotacao.id}`, corpo) : api.post(`/solicitacoes/${d.solicitacao.id}/propostas`, corpo));
+      toast("sucesso", cotacao ? "Proposta atualizada" : "Proposta registrada", "O mapa comparativo foi atualizado.");
+      m.fechar();
+      aoSalvar?.(r, true);
+    } catch (erro) { mostrarErrosCampos(form, erro.campos); toastErro(erro); }
+  });
+}
+
+function visualizarAnexo(id, nome = "Documento") {
+  api.baixar(`/anexos/${id}/arquivo`, { inline: 1 }, { abrir: true, nomePadrao: nome }).catch(toastErro);
+}
+
+// ------------------------------------------------------------------ montagem
+export async function montar({ raiz, params, consulta }) {
+  let d = await api.get(`/solicitacoes/${params.id}`);
+  let aba = consulta.aba || "resumo";
+
+  function renderizarTudo() {
+    const s = d.solicitacao;
+    const a = d.acoes;
+    const decisao = a.includes("aprovar");
+    const acoes = html`
+      ${a.includes("reenviar") ? html`<a class="botao" href="/solicitacoes/${s.id}/ajustar">${icone("editar")}Ajustar e reenviar</a>` : ""}
+      ${a.includes("iniciar_cotacao") ? html`<button class="botao" data-acao="iniciar_cotacao">${icone("play")}Iniciar cotação</button>` : ""}
+      ${a.includes("emitir_pedido") ? html`<button class="botao" data-acao="emitir_pedido">${icone("pedido")}Emitir pedido de compra</button>` : ""}
+      ${a.includes("reabrir_cotacao") ? html`<button class="botao secundario" data-acao="reabrir_cotacao">${icone("devolver")}Reabrir cotação</button>` : ""}
+      ${a.includes("cancelar") ? html`<button class="botao perigo-suave" data-acao="cancelar">${icone("x_circulo")}Cancelar</button>` : ""}
+      <button class="botao secundario" data-dossie>${icone("pdf")}Dossiê PDF</button>`;
+    const avisos = [];
+    if (s.status === "devolvida" && s.motivo_devolucao) avisos.push(aviso("alerta", "Devolvida para ajustes", s.motivo_devolucao, a.includes("reenviar") ? html`<a class="botao pequeno" href="/solicitacoes/${s.id}/ajustar">Ajustar agora</a>` : ""));
+    if (s.status === "reprovada") avisos.push(aviso("perigo", "Solicitação reprovada", s.motivo_reprovacao));
+    if (s.status === "cancelada") avisos.push(aviso("perigo", "Solicitação cancelada", s.motivo_cancelamento));
+    if (s.status === "concluida") avisos.push(aviso("sucesso", "Processo concluído", `Itens recebidos e conferidos em ${formato.dataHora(s.finalizado_em)}.`));
+    if (s.sla_situacao === "estourado") avisos.push(aviso("perigo", "Prazo de atendimento estourado", `O prazo venceu em ${formato.dataHora(s.sla_prazo_limite)}.`));
 
     renderizar(raiz, html`
-      <nav class="migalhas" aria-label="Trilha"><a href="/solicitacoes">Solicitações</a><span aria-hidden="true">›</span><span class="mono">${s.codigo}</span></nav>
-      <div class="cabecalho-pagina">
-        <div class="titulos"><h1>${s.titulo}</h1>
-          <div class="linha-flex">${badgeStatus(s.status)}${badgeUrgencia(s.urgencia)}${badgeSetor(s.setor_codigo, s.setor_nome, s.setor_cor)}${badgeSla(s.sla_situacao, s.sla_horas_restantes)}
-            <span class="pequeno texto-3"><span class="mono">${s.codigo}</span> · aberta ${formato.relativo(s.criado_em)} por ${s.gestor_nome}</span></div></div>
-        <div class="grupo-botoes"><button class="botao secundario" data-dossie>${icone("pdf")}Dossiê em PDF</button></div>
-      </div>
-
-      <div class="layout-detalhe">
-        <div class="pilha">
-          <section class="cartao"><div class="cartao-corpo">${etapas(s)}</div></section>
-          ${pareceres.map(([tom, titulo, texto, tomReal]) => aviso(tomReal || tom, titulo, texto))}
-
-          <section class="cartao" aria-labelledby="t-dados"><div class="cartao-cabecalho"><h2 id="t-dados">Dados da solicitação</h2></div>
-            <div class="cartao-corpo pilha">
-              <dl class="definicoes">
-                <div><dt>Tipo</dt><dd>${rotulo("tipo_solicitacao", s.tipo)}</dd></div>
-                <div><dt>Valor estimado</dt><dd class="num">${formato.moeda(s.valor_estimado)}</dd></div>
-                <div><dt>Valor homologado</dt><dd class="num">${s.valor_final_aprovado ? html`<strong>${formato.moeda(s.valor_final_aprovado)}</strong>` : "—"}</dd></div>
-                <div><dt>Rodada de cotação</dt><dd>${s.rodada_cotacao}ª</dd></div>
-                <div><dt>Comprador</dt><dd>${s.comprador_nome || "—"}</dd></div>
-                <div><dt>Última atualização</dt><dd>${formato.dataHora(s.atualizado_em)}</dd></div>
-              </dl>
-              <div><h3 class="pequeno texto-3">Descrição</h3><p class="texto-longo">${s.descricao}</p></div>
-              <div><h3 class="pequeno texto-3">Justificativa do gestor</h3><p class="texto-longo">${s.justificativa}</p></div>
-            </div></section>
-
-          <section class="cartao" aria-labelledby="t-anexos"><div class="cartao-cabecalho"><h2 id="t-anexos">Documentos</h2>
-              ${acoes.includes("compras_cotacao") ? html`<button class="botao secundario pequeno" data-anexar-proposta>${icone("upload")}Anexar proposta</button>` : ""}
-              ${estado.usuario.papel === "gestor" && s.status === "aguardando_adm" && ativos.filter((a) => a.origem === "solicitante").length < 3 ? html`<button class="botao secundario pequeno" data-anexar-gestor>${icone("upload")}Anexar documento</button>` : ""}</div>
-            <div class="cartao-corpo">
-              ${ativos.length ? html`<ul class="lista-arquivos">${ativos.map((a) => html`<li class="arquivo bloco">
-                <div class="linha-flex"><span class="icone-arquivo">${icone(a.mime === "application/pdf" ? "pdf" : "documento")}</span>
-                  <span class="quebra"><span class="nome">${a.nome_original}</span><br><span class="meta">${rotulo("tipo_documento", a.tipo_documento)} · ${a.origem === "compras" ? "Compras" : "Solicitante"} · ${formato.tamanho(a.tamanho)} · ${a.enviado_por_nome} · ${formato.dataHora(a.criado_em)}${a.rodada_cotacao > 1 ? ` · ${a.rodada_cotacao}ª rodada` : ""}</span></span>
-                  <span class="acoes"><button class="botao fantasma pequeno icone" data-ver="${a.id}" aria-label="Visualizar ${a.nome_original}" title="Visualizar">${icone("olho")}</button>
-                  <button class="botao fantasma pequeno icone" data-baixar="${a.id}" aria-label="Baixar ${a.nome_original}" title="Baixar">${icone("download")}</button></span></div>
-                ${painelOcr(a)}
-                <p class="mono-hash" title="SHA-256 do arquivo original">SHA-256 ${a.sha256}</p></li>`)}</ul>`
-                : html`<p class="texto-3">Nenhum documento anexado.</p>`}
-              ${removidos.length ? html`<details class="pequeno"><summary class="texto-3">Documentos substituídos (${removidos.length})</summary><ul class="lista-arquivos">${removidos.map((a) => html`<li class="arquivo removido"><span class="icone-arquivo">${icone("documento")}</span><span><span class="nome">${a.nome_original}</span><br><span class="meta">${a.rodada_cotacao}ª rodada · removido em ${formato.dataHora(a.removido_em)}</span></span><span class="acoes"><button class="botao fantasma pequeno icone" data-baixar="${a.id}" aria-label="Baixar ${a.nome_original}">${icone("download")}</button></span></li>`)}</ul></details>` : ""}
-            </div></section>
-
-          ${cotacoes.length || acoes.includes("compras_cotacao") ? html`<section class="cartao" aria-labelledby="t-cot"><div class="cartao-cabecalho"><h2 id="t-cot">Cotações</h2>
-              ${acoes.includes("compras_cotacao") ? html`<button class="botao pequeno" data-nova-cotacao>${icone("mais")}Lançar cotação</button>` : ""}</div>
-            ${cotacoes.length ? html`<div class="tabela-envoltorio"><table class="tabela responsiva"><thead><tr><th>Fornecedor</th><th class="direita">Valor</th><th>Prazo</th><th>Pagamento</th><th>Validade</th>${acoes.includes("compras_cotacao") ? html`<th><span class="sr-only">Ações</span></th>` : ""}</tr></thead>
-              <tbody>${cotacoes.map((c, i) => html`<tr class="${c.selecionada ? "cotacao-vencedora" : ""}">
-                <td class="principal" data-rotulo="Fornecedor"><strong>${c.razao_social}</strong>${c.selecionada ? html` <span class="badge sucesso">${icone("check")}Vencedora</span>` : i === 0 && cotacoes.length > 1 ? html` <span class="badge info">Menor preço</span>` : ""}
-                  <span class="sub mono">${formato.cnpj(c.cnpj)}</span>${c.observacoes ? html`<span class="sub">${c.observacoes}</span>` : ""}</td>
-                <td class="direita num" data-rotulo="Valor"><strong>${formato.moeda(c.valor)}</strong></td>
-                <td data-rotulo="Prazo">${c.prazo_entrega_dias} dias</td>
-                <td data-rotulo="Pagamento">${c.condicoes_pagamento || "—"}</td>
-                <td data-rotulo="Validade">${formato.data(c.validade_proposta)}</td>
-                ${acoes.includes("compras_cotacao") ? html`<td data-rotulo="Ações"><div class="grupo-botoes"><button class="botao fantasma pequeno icone" data-editar-cotacao="${c.id}" aria-label="Editar cotação de ${c.razao_social}">${icone("editar")}</button>
-                  <button class="botao fantasma pequeno icone" data-excluir-cotacao="${c.id}" aria-label="Excluir cotação de ${c.razao_social}">${icone("lixeira")}</button></div></td>` : ""}
-              </tr>`)}</tbody></table></div>` : html`<div class="cartao-corpo"><p class="texto-3">Nenhuma cotação lançada. Cadastre ao menos uma proposta para homologar.</p></div>`}
-          </section>` : ""}
-
-          <section class="cartao" aria-labelledby="t-hist"><div class="cartao-cabecalho"><h2 id="t-hist">Histórico</h2></div>
-            <div class="cartao-corpo"><ol class="linha-tempo">${historico.map((h) => html`<li><span class="marcador ${marcadorHistorico(h)}"></span>
-              <div class="quando"><time datetime="${h.criado_em}">${formato.dataHora(h.criado_em)}</time> · ${h.autor_nome || "Sistema"}${h.autor_papel ? ` (${rotulo("papel", h.autor_papel)})` : ""}</div>
-              <div class="o-que">${tituloHistorico(h)}</div>${h.observacao ? html`<div class="obs">${h.observacao}</div>` : ""}</li>`)}</ol></div></section>
-        </div>
-
-        <aside class="pilha">
-          <section class="cartao" aria-labelledby="t-acoes"><div class="cartao-cabecalho"><h2 id="t-acoes">Ações</h2></div>
-            <div class="cartao-corpo acoes-fluxo">${botoesAcoes(acoes, cotacoes)}</div></section>
-          <section class="cartao" aria-labelledby="t-sla"><div class="cartao-cabecalho"><h2 id="t-sla">Prazo (SLA)</h2></div>
-            <div class="cartao-corpo pilha-sm">${badgeSla(s.sla_situacao, s.sla_horas_restantes)}
-              <dl class="definicoes"><div><dt>Prazo limite</dt><dd>${formato.dataHora(s.sla_prazo_limite)}</dd></div>
-              <div><dt>${s.sla_concluido_em ? "Concluída em" : "Tempo restante"}</dt><dd>${s.sla_concluido_em ? formato.dataHora(s.sla_concluido_em) : formato.horasRestantes(s.sla_horas_restantes)}</dd></div></dl>
-              <p class="minusculo texto-3">Urgência ${rotulo("urgencia", s.urgencia)}: ${estado.meta.sla_dias[s.urgencia]} dias corridos a partir da abertura.</p></div></section>
-          <section class="cartao" aria-labelledby="t-ass"><div class="cartao-cabecalho"><h2 id="t-ass">Assinaturas eletrônicas</h2></div>
-            <div class="cartao-corpo">${assinaturas.map((a) => html`<div class="assinatura"><span class="selo">${icone("assinatura")}</span>
-              <div class="quebra"><strong>${a.usuario_nome}</strong> <span class="minusculo texto-3">${rotulo("papel", a.usuario_papel)}</span><br>
-              <span class="pequeno">${rotulo("acao_assinatura", a.acao)}</span><br>
-              <span class="minusculo texto-3">${formato.dataHora(a.assinado_em)} · IP ${a.ip}</span>
-              <p class="mono-hash" title="${a.algoritmo}">${a.hash_autenticidade}</p>
-              <button class="botao fantasma pequeno" data-verificar="${a.id}">${icone("escudo")}Verificar autenticidade</button></div></div>`)}</div></section>
-        </aside>
+      ${cabecalho({
+        titulo: s.titulo, extra: badgeStatus(s.status, true),
+        sub: html`<span class="mono">${s.codigo}</span> · ${s.setor_nome} · aberta por ${s.solicitante_nome} ${formato.relativo(s.criado_em)}${s.aberta_por_gestor ? " · aberta pelo gestor" : ""}`,
+        migalhas: [{ rotulo: "Solicitações", href: "/solicitacoes" }, { rotulo: s.codigo }], acoes,
+      })}
+      <div class="pilha">
+        <section class="cartao">${fluxo(s)}</section>
+        ${avisos.length ? html`<div class="pilha-sm">${avisos}</div>` : ""}
+        <section class="cartao">${abas([
+          { valor: "resumo", rotulo: "Resumo", icone: "info" },
+          { valor: "cotacao", rotulo: "Cotação", icone: "balanca", qtd: d.cotacoes.length || null },
+          { valor: "pedido", rotulo: "Pedido e recebimento", icone: "pedido", qtd: d.pedidos.length || null },
+          { valor: "documentos", rotulo: "Documentos", icone: "anexo", qtd: d.anexos.filter((x) => !x.removido_em).length || null },
+          { valor: "historico", rotulo: "Histórico e assinaturas", icone: "historico" },
+        ], aba, { nome: "aba" })}</section>
+        <div id="conteudo-aba">${aba === "cotacao" ? abaCotacao(d) : aba === "pedido" ? abaPedido(d) : aba === "documentos" ? abaDocumentos(d) : aba === "historico" ? abaHistorico(d)
+          : html`<div class="grade-principal">
+            <div class="pilha">
+              <section class="cartao"><div class="cartao-cabecalho"><h2>${icone("caixa")}Itens solicitados</h2><span class="badge">${d.itens.length} ${d.itens.length === 1 ? "item" : "itens"}</span></div>${tabelaItens(d)}</section>
+              <section class="cartao"><div class="cartao-cabecalho"><h2>${icone("editar")}Justificativa</h2></div>
+                <div class="cartao-corpo pilha"><p class="texto-longo">${s.justificativa}</p>
+                ${s.descricao ? html`<div><p class="grupo-titulo-secao">Especificações e observações</p><p class="texto-longo">${s.descricao}</p></div>` : ""}</div></section>
+            </div>
+            <aside>${decisao ? blocoDecisao(d) : ""}${blocoDados(s)}${blocoAprovacoes(d)}</aside>
+          </div>`}</div>
       </div>`);
+    if (aba === "documentos" && a.includes("anexar")) ativarFormAnexo();
   }
 
-  function botoesAcoes(acoes, cotacoes) {
-    if (!acoes.length) return html`<p class="pequeno texto-3">Nenhuma ação disponível para o seu perfil nesta etapa.</p>`;
-    const b = {
-      adm_aprovar: html`<button class="botao sucesso" data-acao="adm_aprovar">${icone("check_circulo")}Aprovar e liberar para Compras</button>`,
-      adm_nova_cotacao: html`<button class="botao alerta" data-acao="adm_nova_cotacao">${icone("devolver")}Solicitar nova cotação</button>`,
-      adm_rejeitar: html`<button class="botao perigo" data-acao="adm_rejeitar">${icone("x_circulo")}Rejeitar</button>`,
-      adm_urgencia: html`<button class="botao secundario" data-acao="adm_urgencia">${icone("bandeira")}Alterar urgência</button>`,
-      gestor_reenviar: html`<button class="botao" data-acao="gestor_reenviar">${icone("enviar")}Revisar e reenviar</button>`,
-      gestor_cancelar: html`<button class="botao secundario" data-acao="gestor_cancelar">${icone("fechar")}Cancelar solicitação</button>`,
-      compras_iniciar: html`<button class="botao" data-acao="compras_iniciar">${icone("play")}Iniciar cotação</button>`,
-      compras_homologar: html`<button class="botao sucesso" data-acao="compras_homologar" ${cotacoes.length ? "" : seguro("disabled")}>${icone("assinatura")}Homologar</button>
-        ${cotacoes.length ? "" : html`<p class="minusculo texto-3">Lance ao menos uma cotação para homologar.</p>`}`,
-      compras_rejeitar: html`<button class="botao perigo" data-acao="compras_rejeitar">${icone("x_circulo")}Rejeitar</button>`,
-    };
-    return html`${acoes.filter((a) => b[a]).map((a) => b[a])}`;
-  }
+  function atualizar(novo) { d = novo; renderizarTudo(); }
+  async function recarregar() { atualizar(await api.get(`/solicitacoes/${params.id}`)); }
 
-  async function executar(acao, corpo, botao) {
-    const promessa = api.post(`/solicitacoes/${id}/acoes/${acao}`, { versao: dados.solicitacao.versao, ...corpo });
-    dados = await (botao ? comCarregamento(botao, promessa) : promessa);
-    desenhar();
-  }
-
-  async function acaoComTexto(acao, cfg, botao) {
-    modalAberto = true;
-    const r = await confirmar(cfg);
-    modalAberto = false;
-    if (!r.confirmado) return;
-    try {
-      await executar(acao, { texto: r.texto }, botao);
-      toast("sucesso", cfg.sucesso);
-    } catch (e) { toastErro(e); if (e.status === 409) carregar(); }
-  }
-
-  const acoesMap = {
-    adm_aprovar: (b) => acaoComTexto("adm_aprovar", {
-      titulo: "Aprovar solicitação", mensagem: "A solicitação será liberada para o setor de Compras e sua assinatura eletrônica será registrada.",
-      justificativa: "Parecer da Administração (opcional)", rotuloConfirmar: "Aprovar e assinar", tom: "sucesso", sucesso: "Solicitação aprovada e liberada para Compras",
-    }, b),
-    adm_rejeitar: (b) => acaoComTexto("adm_rejeitar", {
-      titulo: "Rejeitar solicitação", mensagem: "A solicitação será encerrada. Esta ação não pode ser desfeita.",
-      justificativa: "Justificativa da rejeição", minimo: 10, rotuloConfirmar: "Rejeitar e assinar", tom: "perigo", sucesso: "Solicitação rejeitada",
-    }, b),
-    adm_nova_cotacao: (b) => acaoComTexto("adm_nova_cotacao", {
-      titulo: "Solicitar nova cotação", mensagem: "A solicitação voltará ao gestor para anexar novos orçamentos.",
-      justificativa: "Orientação ao gestor", minimo: 10, rotuloConfirmar: "Devolver ao gestor", tom: "alerta", sucesso: "Solicitação devolvida ao gestor",
-    }, b),
-    gestor_cancelar: (b) => acaoComTexto("gestor_cancelar", {
-      titulo: "Cancelar solicitação", mensagem: "A solicitação será encerrada definitivamente.",
-      justificativa: "Motivo do cancelamento", minimo: 10, rotuloConfirmar: "Cancelar solicitação", tom: "perigo", sucesso: "Solicitação cancelada",
-    }, b),
-    compras_rejeitar: (b) => acaoComTexto("compras_rejeitar", {
-      titulo: "Rejeitar na etapa de Compras", mensagem: "A solicitação será encerrada com assinatura do setor de Compras.",
-      justificativa: "Justificativa", minimo: 10, rotuloConfirmar: "Rejeitar e assinar", tom: "perigo", sucesso: "Solicitação rejeitada por Compras",
-    }, b),
-    compras_iniciar: async (b) => {
-      const r = await confirmar({ titulo: "Iniciar cotação", mensagem: "Você será registrado como comprador responsável por esta solicitação.", rotuloConfirmar: "Iniciar cotação" });
-      if (!r.confirmado) return;
-      try { await executar("compras_iniciar", {}, b); toast("sucesso", "Cotação iniciada"); } catch (e) { toastErro(e); }
-    },
-    adm_urgencia: () => modalUrgencia(),
-    gestor_reenviar: () => modalReenvio(),
-    compras_homologar: () => modalHomologacao(),
-  };
-
-  function modalUrgencia() {
-    const s = dados.solicitacao;
-    modalAberto = true;
-    const m = modal({
-      titulo: "Alterar urgência",
-      conteudo: html`<form id="f-urg" class="pilha" novalidate>
-        <p class="texto-2">Urgência atual: <strong>${rotulo("urgencia", s.urgencia)}</strong>. O prazo de SLA será recalculado a partir da data de abertura.</p>
-        <div class="campo"><label for="u-nova">Nova urgência</label><select id="u-nova" name="urgencia">${opcoes(
-          Object.fromEntries(Object.entries(estado.meta.rotulos.urgencia).filter(([v]) => v !== s.urgencia).map(([v, r]) => [v, `${r} — ${estado.meta.sla_dias[v]} dias`])))}</select></div>
-        <div class="campo"><label for="u-just">Justificativa administrativa<span class="obrigatorio" aria-hidden="true">*</span></label><textarea id="u-just" name="texto" minlength="10" required></textarea></div>
-      </form>`,
-      rodape: html`<button class="botao secundario" data-fechar>Cancelar</button><button class="botao" type="submit" form="f-urg">Salvar alteração</button>`,
-      aoFechar: () => { modalAberto = false; },
-    });
-    const form = m.el.querySelector("#f-urg");
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const d = dadosFormulario(form);
-      if ((d.texto || "").length < 10) { mostrarErrosCampos(form, { texto: "Mínimo de 10 caracteres" }); return; }
-      try {
-        await executar("adm_urgencia", d, m.el.querySelector('button[type="submit"]'));
-        m.fechar();
-        toast("sucesso", "Urgência alterada", "O SLA foi recalculado e o gestor foi notificado.");
-      } catch (err) { mostrarErrosCampos(form, err.campos); toastErro(err); }
-    });
-  }
-
-  function modalReenvio() {
-    const s = dados.solicitacao;
-    const ativos = dados.anexos.filter((a) => !a.removido_em && a.origem === "solicitante");
-    modalAberto = true;
-    const m = modal({
-      titulo: "Revisar e reenviar à Administração", largo: true,
-      conteudo: html`<form id="f-reenvio" class="pilha" novalidate>
-        ${aviso("alerta", "Orientação da Administração", s.motivo_nova_cotacao)}
-        <div class="form-grade">
-          <div class="campo"><label for="r-titulo">Título</label><input id="r-titulo" name="titulo" value="${s.titulo}" minlength="5" maxlength="160"></div>
-          <div class="campo"><label for="r-desc">Descrição</label><textarea id="r-desc" name="descricao" maxlength="5000">${s.descricao}</textarea></div>
-          <div class="campo"><label for="r-just">Justificativa</label><textarea id="r-just" name="justificativa" minlength="20" maxlength="5000">${s.justificativa}</textarea></div>
-          <div class="campo col-6"><label for="r-valor">Valor estimado (R$)</label><input id="r-valor" name="valor_estimado" inputmode="decimal" value="${formato.entradaDecimal(s.valor_estimado)}"></div>
-        </div>
-        ${ativos.length ? html`<fieldset><legend>Anexos atuais — marque para substituir</legend><div class="pilha-sm">${ativos.map((a) => html`<label class="checkbox"><input type="checkbox" name="remover" value="${a.id}"><span>${a.nome_original} <span class="minusculo texto-3">(${formato.tamanho(a.tamanho)})</span></span></label>`)}</div></fieldset>` : ""}
-        ${zonaUpload({ id: "novos", max: 3, rotulo: "Novos orçamentos", ajuda: "Máximo de 3 anexos ativos no total." })}
-        <div class="campo"><label for="r-obs">Observação para a Administração</label><textarea id="r-obs" name="texto" maxlength="2000"></textarea></div>
-        <label class="checkbox"><input type="checkbox" name="ciente" required><span>Assino eletronicamente o reenvio desta solicitação.</span></label>
-      </form>`,
-      rodape: html`<button class="botao secundario" data-fechar>Cancelar</button><button class="botao" type="submit" form="f-reenvio">${icone("assinatura")}Assinar e reenviar</button>`,
-      aoFechar: () => { modalAberto = false; },
-    });
-    const form = m.el.querySelector("#f-reenvio");
-    const upload = ativarUpload(form, { id: "novos", max: 3 - ativos.length });
-    form.addEventListener("change", (e) => {
-      if (e.target.name === "remover") upload.definirMaximo(3 - ativos.length + form.querySelectorAll('input[name="remover"]:checked').length);
-    });
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      if (!form.ciente.checked) { mostrarErrosCampos(form, { ciente: "Confirme a assinatura" }); return; }
-      const fd = new FormData();
-      fd.append("versao", s.versao);
-      const mudou = (campo, valorAtual) => form[campo].value.trim() !== String(valorAtual ?? "").trim();
-      if (mudou("titulo", s.titulo)) fd.append("titulo", form.titulo.value.trim());
-      if (mudou("descricao", s.descricao)) fd.append("descricao", form.descricao.value.trim());
-      if (mudou("justificativa", s.justificativa)) fd.append("justificativa", form.justificativa.value.trim());
-      if (form.valor_estimado.value.trim() && mudou("valor_estimado", formato.entradaDecimal(s.valor_estimado))) fd.append("valor_estimado", form.valor_estimado.value.trim());
-      const remover = [...form.querySelectorAll('input[name="remover"]:checked')].map((c) => c.value);
-      if (remover.length) fd.append("remover_anexos", remover.join(","));
-      if (form.texto.value.trim()) fd.append("texto", form.texto.value.trim());
-      upload.arquivos().forEach((a) => fd.append("arquivos", a, a.name));
-      try {
-        dados = await comCarregamento(m.el.querySelector('button[type="submit"]'), api.enviarFormulario(`/solicitacoes/${id}/acoes/gestor_reenviar`, fd));
-        m.fechar();
-        desenhar();
-        toast("sucesso", "Solicitação reenviada", "A Administração foi notificada.");
-      } catch (err) { mostrarErrosCampos(form, err.campos); toastErro(err); }
-    });
-  }
-
-  function modalHomologacao() {
-    const cot = dados.cotacoes;
-    const menor = cot.reduce((a, b) => (Number(b.valor) < Number(a.valor) ? b : a), cot[0]);
-    modalAberto = true;
-    const m = modal({
-      titulo: "Homologar solicitação", largo: true,
-      conteudo: html`<form id="f-homolog" class="pilha" novalidate>
-        <fieldset data-campo="cotacao_id"><legend>Cotação vencedora</legend><div class="pilha-sm">${cot.map((c) => html`<label class="checkbox arquivo">
-          <input type="radio" name="cotacao_id" value="${c.id}" data-valor="${c.valor}" ${c.id === menor.id ? html`checked` : ""}>
-          <span><strong>${c.razao_social}</strong> — ${formato.moeda(c.valor)} · ${c.prazo_entrega_dias} dias${c.id === menor.id ? html` <span class="badge info">Menor preço</span>` : ""}<br>
-          <span class="minusculo texto-3 mono">${formato.cnpj(c.cnpj)}</span></span></label>`)}</div></fieldset>
-        <div class="form-grade"><div class="campo col-6"><label for="h-valor">Valor final homologado (R$)</label><input id="h-valor" name="valor_final" inputmode="decimal" value="${formato.entradaDecimal(menor.valor)}"></div></div>
-        <div class="campo"><label for="h-obs">Parecer de Compras</label><textarea id="h-obs" name="texto" maxlength="2000" placeholder="Critérios da escolha: preço, prazo, qualificação técnica…"></textarea></div>
-        ${aviso("info", "Assinatura final", "A homologação registra sua assinatura eletrônica e encerra o fluxo com status Homologada.")}
-        <label class="checkbox"><input type="checkbox" name="ciente" required><span>Confirmo a homologação e assino eletronicamente.</span></label>
-      </form>`,
-      rodape: html`<button class="botao secundario" data-fechar>Cancelar</button><button class="botao sucesso" type="submit" form="f-homolog">${icone("assinatura")}Homologar e assinar</button>`,
-      aoFechar: () => { modalAberto = false; },
-    });
-    const form = m.el.querySelector("#f-homolog");
-    form.addEventListener("change", (e) => {
-      if (e.target.name === "cotacao_id") form.valor_final.value = formato.entradaDecimal(e.target.dataset.valor);
-    });
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const d = dadosFormulario(form);
-      if (!d.ciente) { mostrarErrosCampos(form, { ciente: "Confirme a assinatura" }); return; }
-      try {
-        await executar("compras_homologar", { cotacao_id: d.cotacao_id, valor_final: d.valor_final, texto: d.texto }, m.el.querySelector('button[type="submit"]'));
-        m.fechar();
-        toast("sucesso", "Solicitação homologada", "O gestor e a Administração foram notificados.");
-      } catch (err) { mostrarErrosCampos(form, err.campos); toastErro(err); }
-    });
-  }
-
-  async function modalCotacao(cotacao = null) {
-    modalAberto = true;
-    let fornecedores = [];
-    try { fornecedores = (await api.get("/fornecedores", { ativos: 1, por_pagina: 200 })).itens; } catch (e) { toastErro(e); }
-    const anexos = dados.anexos.filter((a) => !a.removido_em);
-    const comOcr = anexos.filter((a) => a.ocr_status === "concluido" && a.dados_ocr);
-    const m = modal({
-      titulo: cotacao ? "Editar cotação" : "Lançar cotação", largo: true,
-      conteudo: html`<form id="f-cot" class="pilha" novalidate>
-        ${!cotacao && comOcr.length ? html`<div class="aviso info">${icone("ocr")}<div><strong>Preencher com dados do OCR</strong>
-          <div class="linha-flex">${comOcr.map((a) => html`<button type="button" class="botao secundario pequeno" data-usar-ocr="${a.id}">${a.nome_original}</button>`)}</div></div></div>` : ""}
-        <div class="form-grade">
-          ${cotacao ? html`<div class="campo"><span class="rotulo">Fornecedor</span><p><strong>${cotacao.razao_social}</strong> · <span class="mono">${formato.cnpj(cotacao.cnpj)}</span></p></div>` : html`
-          <div class="campo col-8"><label for="c-forn">Fornecedor<span class="obrigatorio" aria-hidden="true">*</span></label>
-            <select id="c-forn" name="fornecedor_id">${opcoes(Object.fromEntries(fornecedores.map((f) => [f.id, `${f.razao_social} — ${formato.cnpj(f.cnpj)}`])), "", { vazio: "Selecione…" })}<option value="__novo">+ Cadastrar novo fornecedor</option></select></div>
-          <div class="col-4"></div>
-          <div class="form-grade oculto" data-novo-fornecedor>
-            <div class="campo col-8"><label for="n-razao">Razão social<span class="obrigatorio" aria-hidden="true">*</span></label><input id="n-razao" name="razao_social" maxlength="160"></div>
-            <div class="campo col-4"><label for="n-cnpj">CNPJ<span class="obrigatorio" aria-hidden="true">*</span></label><input id="n-cnpj" name="cnpj" maxlength="18" placeholder="00.000.000/0000-00" class="mono"></div>
-            <div class="campo col-6"><label for="n-email">E-mail</label><input id="n-email" name="email" type="email"></div>
-            <div class="campo col-6"><label for="n-tel">Telefone</label><input id="n-tel" name="telefone" type="tel"></div>
-          </div>`}
-          <div class="campo col-4"><label for="c-valor">Valor (R$)<span class="obrigatorio" aria-hidden="true">*</span></label><input id="c-valor" name="valor" inputmode="decimal" required value="${cotacao ? formato.entradaDecimal(cotacao.valor) : ""}"></div>
-          <div class="campo col-4"><label for="c-prazo">Prazo de entrega (dias)<span class="obrigatorio" aria-hidden="true">*</span></label><input id="c-prazo" name="prazo_entrega_dias" type="number" min="0" max="3650" required value="${cotacao?.prazo_entrega_dias ?? ""}"></div>
-          <div class="campo col-4"><label for="c-val">Validade da proposta</label><input id="c-val" name="validade_proposta" type="date" value="${cotacao?.validade_proposta ?? ""}"></div>
-          <div class="campo col-6"><label for="c-pag">Condições de pagamento</label><input id="c-pag" name="condicoes_pagamento" maxlength="300" value="${cotacao?.condicoes_pagamento ?? ""}"></div>
-          <div class="campo col-6"><label for="c-anexo">Documento da proposta</label><select id="c-anexo" name="anexo_id">${opcoes(Object.fromEntries(anexos.map((a) => [a.id, a.nome_original])), cotacao?.anexo_id || "", { vazio: "Nenhum" })}</select></div>
-          <div class="campo"><label for="c-obs">Observações</label><textarea id="c-obs" name="observacoes" maxlength="2000">${cotacao?.observacoes ?? ""}</textarea></div>
-        </div></form>`,
-      rodape: html`<button class="botao secundario" data-fechar>Cancelar</button><button class="botao" type="submit" form="f-cot">${icone("check")}Salvar cotação</button>`,
-      aoFechar: () => { modalAberto = false; },
-    });
-    const form = m.el.querySelector("#f-cot");
-    const blocoNovo = form.querySelector("[data-novo-fornecedor]");
-    form.fornecedor_id?.addEventListener("change", () => blocoNovo.classList.toggle("oculto", form.fornecedor_id.value !== "__novo"));
-    on(form, "click", "[data-usar-ocr]", (e, b) => {
-      const a = comOcr.find((x) => x.id === b.dataset.usarOcr);
-      const d = a.dados_ocr;
-      if (d.valor_total) form.valor.value = formato.entradaDecimal(d.valor_total.valor);
-      if (d.prazo_entrega_dias) form.prazo_entrega_dias.value = d.prazo_entrega_dias.valor;
-      if (d.condicoes_pagamento) form.condicoes_pagamento.value = d.condicoes_pagamento.valor;
-      if (d.validade_data) form.validade_proposta.value = d.validade_data.valor;
-      else if (d.validade_dias && d.data_emissao) {
-        const base = new Date(d.data_emissao.valor + "T12:00:00");
-        base.setDate(base.getDate() + Number(d.validade_dias.valor));
-        form.validade_proposta.value = base.toISOString().slice(0, 10);
-      }
-      form.anexo_id.value = a.id;
-      const cnpj = (d.cnpj_emitente?.valor || "").replace(/[^0-9A-Z]/gi, "").toUpperCase();
-      const existente = fornecedores.find((f) => f.cnpj === cnpj);
-      if (existente) {
-        form.fornecedor_id.value = existente.id;
-        blocoNovo.classList.add("oculto");
-      } else if (cnpj) {
-        form.fornecedor_id.value = "__novo";
-        blocoNovo.classList.remove("oculto");
-        form.cnpj.value = d.cnpj_emitente.valor;
-        if (d.razao_social) form.razao_social.value = d.razao_social.valor;
-        if (d.emails?.[0]) form.email.value = d.emails[0];
-      }
-      toast("info", "Campos preenchidos pelo OCR", "Confira os valores antes de salvar.");
-    });
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const d = dadosFormulario(form);
-      const botao = m.el.querySelector('button[type="submit"]');
-      try {
-        await comCarregamento(botao, (async () => {
-          const corpo = { valor: d.valor, prazo_entrega_dias: d.prazo_entrega_dias, condicoes_pagamento: d.condicoes_pagamento,
-            validade_proposta: d.validade_proposta || null, observacoes: d.observacoes, anexo_id: d.anexo_id || null };
-          if (cotacao) {
-            dados = await api.patch(`/cotacoes/${cotacao.id}`, corpo);
-          } else {
-            let fornecedorId = d.fornecedor_id;
-            if (fornecedorId === "__novo") {
-              const f = await api.post("/fornecedores", { razao_social: d.razao_social, cnpj: d.cnpj, email: d.email || null, telefone: d.telefone || null });
-              fornecedorId = f.id;
-            }
-            if (!fornecedorId) throw Object.assign(new Error("Selecione o fornecedor"), { campos: { fornecedor_id: "Selecione o fornecedor" } });
-            dados = await api.post(`/solicitacoes/${id}/cotacoes`, { ...corpo, fornecedor_id: fornecedorId });
-          }
-        })());
-        m.fechar();
-        desenhar();
-        toast("sucesso", cotacao ? "Cotação atualizada" : "Cotação lançada");
-      } catch (err) { mostrarErrosCampos(form, err.campos || {}); toastErro(err); }
-    });
-  }
-
-  async function anexar(origemCompras) {
-    modalAberto = true;
-    const m = modal({
-      titulo: origemCompras ? "Anexar proposta de fornecedor" : "Anexar documento",
-      conteudo: html`<form id="f-anexo" class="pilha" novalidate>
-        <div class="campo"><label for="a-tipo">Tipo de documento</label><select id="a-tipo" name="tipo_documento">${opcoes(origemCompras
-          ? { cotacao: "Proposta de cotação", orcamento: "Orçamento", nota_fiscal: "Nota fiscal", outro: "Outro" }
-          : { orcamento: "Orçamento", nota_fiscal: "Nota fiscal", laudo: "Laudo / certificado", outro: "Outro" }, origemCompras ? "cotacao" : "orcamento")}</select></div>
-        ${zonaUpload({ id: "docs", max: origemCompras ? 5 : 3 - dados.anexos.filter((a) => !a.removido_em && a.origem === "solicitante").length, rotulo: "Arquivos" })}
-      </form>`,
-      rodape: html`<button class="botao secundario" data-fechar>Cancelar</button><button class="botao" type="submit" form="f-anexo">${icone("upload")}Enviar</button>`,
-      aoFechar: () => { modalAberto = false; },
-    });
-    const form = m.el.querySelector("#f-anexo");
-    const up = ativarUpload(form, { id: "docs", max: origemCompras ? 5 : 3 });
+  function ativarFormAnexo() {
+    const form = raiz.querySelector("#form-anexo");
+    if (!form) return;
+    const up = ativarUpload(form, { id: "novos-anexos", max: 5 });
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       if (!up.arquivos().length) { toast("alerta", "Selecione ao menos um arquivo"); return; }
       const fd = new FormData();
       fd.append("tipo_documento", form.tipo_documento.value);
-      up.arquivos().forEach((a) => fd.append("arquivos", a, a.name));
+      up.arquivos().forEach((f) => fd.append("arquivos", f, f.name));
       try {
-        dados = await comCarregamento(m.el.querySelector('button[type="submit"]'), api.enviarFormulario(`/solicitacoes/${id}/anexos`, fd));
-        m.fechar();
-        desenhar();
-        toast("sucesso", "Documento anexado", "O OCR será processado em instantes.");
-      } catch (err) { toastErro(err); }
+        atualizar(await comCarregamento(form.querySelector('[type="submit"]'), api.enviarFormulario(`/solicitacoes/${params.id}/anexos`, fd)));
+        toast("sucesso", "Documentos anexados");
+      } catch (erro) { toastErro(erro); }
     });
   }
 
-  async function verificarAssinatura(assinaturaId) {
+  async function executar(acao, corpo = {}, botao = null, mensagem = "") {
     try {
-      const v = await api.get(`/assinaturas/${assinaturaId}/verificar`);
-      modal({
-        titulo: "Verificação de assinatura",
-        conteudo: html`<div class="pilha">
-          ${v.registro_integro ? aviso("sucesso", "Assinatura autêntica", "O hash HMAC-SHA-256 confere com os dados registrados (usuário, data/hora, IP e conteúdo).")
-            : aviso("perigo", "Assinatura inválida", "Os dados do registro não correspondem ao hash de autenticidade. Acione a segurança da informação.")}
-          ${v.conteudo_inalterado_desde_assinatura ? aviso("info", "Conteúdo inalterado", "A solicitação não foi modificada desde esta assinatura.")
-            : aviso("alerta", "Conteúdo evoluiu após a assinatura", "Houve etapas posteriores (ex.: cotações, decisões). O conteúdo original assinado está preservado no hash.")}
-          <dl class="definicoes"><div><dt>Signatário</dt><dd>${v.usuario_nome}</dd></div><div><dt>Ação</dt><dd>${rotulo("acao_assinatura", v.acao)}</dd></div>
-          <div><dt>Data/hora</dt><dd>${formato.dataHora(v.assinado_em)}</dd></div><div><dt>IP</dt><dd>${v.ip}</dd></div>
-          <div><dt>Algoritmo</dt><dd>${v.algoritmo}</dd></div></dl>
-          <p class="mono-hash">${v.hash_autenticidade}</p></div>`,
-        rodape: html`<button class="botao" data-fechar>Fechar</button>`,
-      });
-    } catch (e) { toastErro(e); }
+      const r = await comCarregamento(botao, api.post(`/solicitacoes/${params.id}/acoes/${acao}`, { versao: d.solicitacao.versao, ...corpo }));
+      atualizar(r);
+      if (mensagem) toast("sucesso", mensagem, `${r.solicitacao.codigo} · ${rotulo("status_solicitacao", r.solicitacao.status)}`);
+      return r;
+    } catch (erro) {
+      toastErro(erro);
+      if (erro.status === 409) recarregar();
+      return null;
+    }
   }
 
-  on(raiz, "click", "[data-acao]", (e, b) => acoesMap[b.dataset.acao]?.(b));
-  on(raiz, "click", "[data-nova-cotacao]", () => modalCotacao());
-  on(raiz, "click", "[data-editar-cotacao]", (e, b) => modalCotacao(dados.cotacoes.find((c) => c.id === b.dataset.editarCotacao)));
-  on(raiz, "click", "[data-excluir-cotacao]", async (e, b) => {
-    const c = dados.cotacoes.find((x) => x.id === b.dataset.excluirCotacao);
-    const r = await confirmar({ titulo: "Excluir cotação", mensagem: `Remover a proposta de ${c.razao_social}?`, rotuloConfirmar: "Excluir", tom: "perigo" });
+  on(raiz, "click", "[data-aba]", (e, b) => { aba = b.dataset.aba; atualizarConsulta({ aba: aba === "resumo" ? "" : aba }); renderizarTudo(); });
+  on(raiz, "click", "[data-decisao]", async (e, b) => {
+    const texto = raiz.querySelector("#parecer")?.value.trim() || "";
+    const decisao = b.dataset.decisao;
+    if (decisao !== "aprovar" && texto.length < 10) {
+      mostrarErrosCampos(raiz.querySelector("#form-decisao"), { texto: "Informe o parecer (mínimo 10 caracteres)" });
+      return;
+    }
+    const nomes = { aprovar: "Solicitação aprovada", devolver: "Solicitação devolvida ao setor", reprovar: "Solicitação reprovada" };
+    await executar(decisao, { texto }, b, nomes[decisao]);
+    emitir("atualizar-contadores");
+  });
+  on(raiz, "click", "[data-acao]", async (e, b) => {
+    const acao = b.dataset.acao;
+    const s = d.solicitacao;
+    if (acao === "iniciar_cotacao") {
+      if (await executar("iniciar_cotacao", {}, b, "Cotação iniciada")) { aba = "cotacao"; atualizarConsulta({ aba }); renderizarTudo(); }
+    } else if (acao === "cancelar") {
+      const r = await confirmar({ titulo: `Cancelar ${s.codigo}?`, mensagem: "O cancelamento encerra a solicitação definitivamente.", justificativa: "Motivo do cancelamento", minimo: 10, rotuloConfirmar: "Cancelar solicitação", tom: "perigo" });
+      if (r.confirmado) await executar("cancelar", { texto: r.texto }, null, "Solicitação cancelada");
+    } else if (acao === "reabrir_cotacao") {
+      const r = await confirmar({ titulo: "Reabrir a cotação?", mensagem: "A escolha do fornecedor será desfeita e novas propostas poderão ser registradas.", justificativa: "Motivo", minimo: 10, rotuloConfirmar: "Reabrir cotação" });
+      if (r.confirmado) await executar("reabrir_cotacao", { texto: r.texto }, null, "Cotação reaberta");
+    } else if (acao === "emitir_pedido") {
+      const v = d.cotacoes.find((c) => c.selecionada);
+      const r = await confirmar({
+        titulo: "Emitir pedido de compra", rotuloConfirmar: "Assinar e emitir pedido", icone: "assinatura",
+        mensagem: "Os itens e valores são copiados da proposta vencedora e não podem ser alterados. O pedido segue para aprovação do Financeiro.",
+        extra: html`<dl class="pares lista"><div><dt>Fornecedor</dt><dd>${v?.nome_fantasia || v?.razao_social}</dd></div><div><dt>Valor total</dt><dd><strong>${formato.moeda(v?.valor_total)}</strong></dd></div><div><dt>Prazo</dt><dd>${v?.prazo_entrega_dias} dias</dd></div></dl>
+          <div class="form-grade"><div class="campo col-6"><label for="e-pag">Condições de pagamento</label><input id="e-pag" name="condicoes_pagamento" maxlength="300" value="${v?.condicoes_pagamento || ""}"></div>
+          <div class="campo col-6"><label for="e-local">Local de entrega</label><input id="e-local" name="local_entrega" maxlength="160" value="${s.local_entrega || "Almoxarifado central"}"></div>
+          <div class="campo"><label for="e-obs">Observações ao fornecedor</label><textarea id="e-obs" name="observacoes" maxlength="2000"></textarea></div></div>`,
+      });
+      if (r.confirmado) {
+        const resp = await executar("emitir_pedido", r.dados, null, "Pedido de compra emitido");
+        if (resp?.pedido_criado) navegar(`/pedidos/${resp.pedido_criado}`);
+      }
+    }
+  });
+  on(raiz, "click", "[data-nova-proposta]", () => modalProposta(d, null, (r) => atualizar(r)).catch(toastErro));
+  on(raiz, "click", "[data-editar-proposta]", (e, b) => modalProposta(d, d.cotacoes.find((c) => c.id === b.dataset.editarProposta), (r) => atualizar(r)).catch(toastErro));
+  on(raiz, "click", "[data-remover-proposta]", async (e, b) => {
+    const c = d.cotacoes.find((x) => x.id === b.dataset.removerProposta);
+    const r = await confirmar({ titulo: "Remover proposta?", mensagem: `A proposta de ${c.nome_fantasia || c.razao_social} será excluída do mapa comparativo.`, rotuloConfirmar: "Remover", tom: "perigo" });
     if (!r.confirmado) return;
-    try { dados = await api.delete(`/cotacoes/${c.id}`); desenhar(); toast("sucesso", "Cotação removida"); } catch (err) { toastErro(err); }
+    try { atualizar(await api.delete(`/propostas/${c.id}`)); toast("sucesso", "Proposta removida"); } catch (erro) { toastErro(erro); }
   });
-  on(raiz, "click", "[data-anexar-proposta]", () => anexar(true));
-  on(raiz, "click", "[data-anexar-gestor]", () => anexar(false));
-  on(raiz, "click", "[data-baixar]", (e, b) => api.baixar(`/anexos/${b.dataset.baixar}/arquivo`).catch(toastErro));
-  on(raiz, "click", "[data-ver]", (e, b) => api.baixar(`/anexos/${b.dataset.ver}/arquivo`, { inline: 1 }, { abrir: true }).catch(toastErro));
-  on(raiz, "click", "[data-reprocessar]", async (e, b) => {
-    try { await api.post(`/anexos/${b.dataset.reprocessar}/reprocessar-ocr`); toast("info", "OCR reenviado para processamento"); setTimeout(carregar, 1500); } catch (err) { toastErro(err); }
+  on(raiz, "click", "[data-escolher]", async (e, b) => {
+    const c = d.cotacoes.find((x) => x.id === b.dataset.escolher);
+    const comp = d.comparacao;
+    const naoMenor = comp.menor_total !== null && Number(c.valor_total) > Number(comp.menor_total);
+    const exige = comp.abaixo_do_minimo || naoMenor;
+    const motivo = [comp.abaixo_do_minimo ? `há menos de ${comp.minimo_cotacoes} propostas` : "", naoMenor ? "a proposta não é a de menor valor" : ""].filter(Boolean).join(" e ");
+    const r = await confirmar({
+      titulo: `Escolher ${c.nome_fantasia || c.razao_social}`, rotuloConfirmar: "Assinar e definir fornecedor", tom: "sucesso", icone: "assinatura",
+      mensagem: html`Valor total <strong>${formato.moeda(c.valor_total)}</strong> · prazo ${c.prazo_entrega_dias} dias · ${c.condicoes_pagamento || "pagamento a combinar"}.`,
+      extra: exige ? aviso("alerta", "Justificativa obrigatória", `Neste caso ${motivo}.`) : "",
+      justificativa: exige ? "Justificativa da escolha" : "Observação (opcional)", minimo: exige ? 10 : 0,
+    });
+    if (r.confirmado) await executar("definir_fornecedor", { cotacao_id: c.id, texto: r.texto }, null, "Fornecedor definido");
   });
-  on(raiz, "click", "[data-verificar]", (e, b) => verificarAssinatura(b.dataset.verificar));
-  on(raiz, "click", "[data-dossie]", (e, b) => comCarregamento(b, api.baixar(`/solicitacoes/${id}/dossie.pdf`, null, { nomePadrao: "dossie.pdf" })).catch(toastErro));
+  on(raiz, "click", "[data-ver-anexo]", (e, b) => visualizarAnexo(b.dataset.verAnexo));
+  on(raiz, "click", "[data-baixar-anexo]", (e, b) => api.baixar(`/anexos/${b.dataset.baixarAnexo}/arquivo`).catch(toastErro));
+  on(raiz, "click", "[data-remover-anexo]", async (e, b) => {
+    const r = await confirmar({ titulo: "Remover documento?", mensagem: "O arquivo deixa de aparecer, mas fica preservado para auditoria.", rotuloConfirmar: "Remover", tom: "perigo" });
+    if (!r.confirmado) return;
+    try { await api.delete(`/anexos/${b.dataset.removerAnexo}`); await recarregar(); toast("sucesso", "Documento removido"); } catch (erro) { toastErro(erro); }
+  });
+  on(raiz, "click", "[data-dossie]", (e, b) => comCarregamento(b, api.baixar(`/solicitacoes/${params.id}/dossie.pdf`)).catch(toastErro));
+  on(raiz, "click", "[data-verificar]", async (e, b) => {
+    try {
+      const v = await comCarregamento(b, api.get(`/assinaturas/${b.dataset.verificar}/verificar`));
+      modal({ titulo: "Verificação da assinatura", sub: rotulo("acao_assinatura", v.acao), conteudo: html`<div class="pilha">
+        ${v.registro_integro ? aviso("sucesso", "Assinatura autêntica", "O registro não foi alterado desde a assinatura.") : aviso("perigo", "Assinatura inválida", "O registro não confere com o hash de autenticidade.")}
+        ${v.conteudo_inalterado_desde_assinatura ? aviso("info", "Conteúdo idêntico ao assinado") : aviso("info", "O processo avançou após esta assinatura", "É esperado: cada etapa posterior altera o conteúdo e gera nova assinatura.")}
+        <dl class="pares lista"><div><dt>Assinante</dt><dd>${v.usuario_nome} · ${rotulo("papel", v.papel)}</dd></div><div><dt>Data e hora</dt><dd>${formato.dataHora(v.assinado_em)}</dd></div>
+        <div><dt>IP de origem</dt><dd>${v.ip}</dd></div><div><dt>Algoritmo</dt><dd>${v.algoritmo}</dd></div></dl>
+        <div><p class="grupo-titulo-secao">Hash de autenticidade</p><p class="mono-hash">${v.hash_autenticidade}</p></div></div>` });
+    } catch (erro) { toastErro(erro); }
+  });
 
-  await carregar();
+  renderizarTudo();
 
-  const recarregar = debounce(() => {
-    if (modalAberto) { toast("info", "Solicitação atualizada", "Houve alterações. Os dados serão atualizados ao fechar a janela."); return; }
-    carregar();
-  }, 600);
-  const desligar = [
-    ouvir("evento", (ev) => { if (ev.id === id || ev.solicitacao_id === id) recarregar(); }),
-    ouvir("consulta-periodica", () => { if (!modalAberto) carregar(); }),
-  ];
-  return { desmontar: () => desligar.forEach((f) => f()) };
+  const recarregarDebounce = debounce(() => { if (!document.querySelector("dialog[open]")) recarregar().catch(() => {}); }, 800);
+  const desligar = ouvir("evento", (ev) => { if (ev.solicitacao_id === params.id || ev.id === params.id) recarregarDebounce(); });
+  return { desmontar: desligar };
 }
+

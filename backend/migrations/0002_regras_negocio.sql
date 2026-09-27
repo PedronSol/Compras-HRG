@@ -66,6 +66,12 @@ as $$
   end
 $$;
 
+-- Valor monetário no formato brasileiro (independente do lc_numeric do servidor).
+create function rg.moeda(v numeric) returns text
+language sql immutable as $$
+  select 'R$ ' || translate(to_char(coalesce(v, 0), 'FM999,999,999,990.00'), ',.', '.,')
+$$;
+
 create function rg.hoje() returns date
 language sql stable
 as $$ select (now() at time zone 'America/Sao_Paulo')::date $$;
@@ -967,9 +973,9 @@ begin
 
   insert into rg.solicitacao_historico (solicitacao_id, pedido_id, autor_id, acao, status_de, status_para, observacao)
   values (new.solicitacao_id, new.id, rg.usuario_atual_id(), 'pedido_emitido', null, new.status::text,
-          'Pedido ' || new.codigo || ' emitido · ' || to_char(new.valor_total, 'FM"R$ "999G999G990D00'));
+          'Pedido ' || new.codigo || ' emitido · ' || rg.moeda(new.valor_total));
   perform rg.notificar_papel('financeiro', 'Pedido aguardando aprovação financeira',
-    new.codigo || ' · ' || to_char(new.valor_total, 'FM"R$ "999G999G990D00'), 'info', '/pedidos/' || new.id);
+    new.codigo || ' · ' || rg.moeda(new.valor_total), 'info', '/pedidos/' || new.id);
   return null;
 end $$;
 

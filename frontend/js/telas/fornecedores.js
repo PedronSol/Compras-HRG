@@ -1,89 +1,136 @@
-// Cadastro de fornecedores (Compras e Administração) com validação de CNPJ numérico e alfanumérico.
+// Fornecedores: cadastro, desempenho (pedidos, pontualidade, conformidade) e histórico.
 import { api } from "../api.js";
-import { atualizarConsulta } from "../roteador.js";
-import { html, renderizar, on, dadosFormulario, mostrarErrosCampos, debounce } from "../ui/dom.js";
-import { icone } from "../ui/icones.js";
-import { comCarregamento, formato, modal, paginacao, toast, toastErro, vazio, erroTela } from "../ui/componentes.js";
 
-export function cnpjValido(valor) {
-  const d = String(valor || "").toUpperCase().replace(/[^0-9A-Z]/g, "");
-  if (!/^[0-9A-Z]{12}\d{2}$/.test(d) || /^(.)\1{13}$/.test(d)) return false;
-  const dv = (base, pesos) => {
-    const soma = [...base].reduce((acc, c, i) => acc + (c.charCodeAt(0) - 48) * pesos[i], 0);
-    const r = soma % 11;
-    return r < 2 ? 0 : 11 - r;
-  };
-  const p1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
-  return dv(d.slice(0, 12), p1) === Number(d[12]) && dv(d.slice(0, 13), [6, ...p1]) === Number(d[13]);
+import { atualizarConsulta } from "../roteador.js";
+import { html, renderizar, on, debounce, dadosFormulario, mostrarErrosCampos } from "../ui/dom.js";
+import { icone } from "../ui/icones.js";
+import {
+  badgePedido, badgeStatus, cabecalho, carregandoBloco, comCarregamento, formato, modal, opcoes, paginacao, pode,
+  toast, toastErro, vazio,
+} from "../ui/componentes.js";
+
+const UFS = "AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO".split(" ");
+
+/** Formulário de cadastro/edição. Resolve com o fornecedor salvo (ou null). */
+export function formularioFornecedor(f = {}) {
+  return new Promise((resolve) => {
+    let salvo = null;
+    const m = modal({
+      titulo: f.id ? "Editar fornecedor" : "Novo fornecedor", sub: "O CNPJ é validado pelos dígitos verificadores (numérico ou alfanumérico).", largo: true,
+      conteudo: html`<form id="form-forn" class="form-grade" novalidate>
+        <div class="campo col-8"><label for="f-razao">Razão social<span class="obrigatorio">*</span></label><input id="f-razao" name="razao_social" required maxlength="160" value="${f.razao_social || ""}" autofocus></div>
+        <div class="campo col-4"><label for="f-cnpj">CNPJ<span class="obrigatorio">*</span></label><input id="f-cnpj" name="cnpj" required maxlength="20" value="${f.cnpj ? formato.cnpj(f.cnpj) : ""}" placeholder="00.000.000/0000-00" ${f.id ? html`readonly` : ""}></div>
+        <div class="campo col-6"><label for="f-fantasia">Nome fantasia</label><input id="f-fantasia" name="nome_fantasia" maxlength="160" value="${f.nome_fantasia || ""}"></div>
+        <div class="campo col-6"><label for="f-contato">Pessoa de contato</label><input id="f-contato" name="contato" maxlength="120" value="${f.contato || ""}"></div>
+        <div class="campo col-6"><label for="f-email">E-mail comercial</label><input id="f-email" name="email" type="email" maxlength="254" value="${f.email || ""}"></div>
+        <div class="campo col-6"><label for="f-tel">Telefone</label><input id="f-tel" name="telefone" type="tel" maxlength="30" value="${f.telefone || ""}"></div>
+        <div class="campo col-8"><label for="f-cidade">Cidade</label><input id="f-cidade" name="cidade" maxlength="80" value="${f.cidade || ""}"></div>
+        <div class="campo col-4"><label for="f-uf">UF</label><select id="f-uf" name="uf">${opcoes(Object.fromEntries(UFS.map((u) => [u, u])), f.uf || "RS", { vazio: "—" })}</select></div>
+        <div class="campo"><label for="f-obs">Observações</label><textarea id="f-obs" name="observacoes" maxlength="1000">${f.observacoes || ""}</textarea></div>
+        ${f.id ? html`<label class="checkbox"><input type="checkbox" name="ativo" ${f.ativo ? html`checked` : ""}><span>Fornecedor ativo (pode receber novas cotações)</span></label>` : ""}
+      </form>`,
+      rodape: html`<button class="botao secundario" data-fechar>Cancelar</button><button class="botao" type="submit" form="form-forn">${icone("check")}Salvar fornecedor</button>`,
+      aoFechar: () => resolve(salvo),
+    });
+    const form = m.el.querySelector("#form-forn");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const dados = dadosFormulario(form);
+      if (f.id) delete dados.cnpj;
+      try {
+        salvo = await comCarregamento(m.el.querySelector('[type="submit"]'), f.id ? api.patch(`/fornecedores/${f.id}`, dados) : api.post("/fornecedores", dados));
+        toast("sucesso", f.id ? "Fornecedor atualizado" : "Fornecedor cadastrado", salvo.nome_fantasia || salvo.razao_social);
+        m.fechar();
+      } catch (erro) { mostrarErrosCampos(form, erro.campos); toastErro(erro); }
+    });
+  });
+}
+
+function indicador(valor, sufixo = "%") {
+  if (valor === null || valor === undefined) return html`<span class="texto-3">—</span>`;
+  const tom = valor >= 90 ? "sucesso" : valor >= 70 ? "alerta" : "perigo";
+  return html`<span class="badge ${tom}">${Math.round(valor)}${sufixo}</span>`;
+}
+
+async function abrirDetalhe(id, aoEditar) {
+  const m = modal({ titulo: "Fornecedor", gaveta: true, conteudo: carregandoBloco(8) });
+  try {
+    const d = await api.get(`/fornecedores/${id}`);
+    const f = d.fornecedor;
+    m.el.querySelector("h2").firstChild.textContent = f.nome_fantasia || f.razao_social;
+    renderizar(m.corpo, html`<div class="pilha">
+      <div><p class="texto-2">${f.razao_social}</p><p class="mono texto-3">${formato.cnpj(f.cnpj)}</p>
+        <div class="linha-flex">${f.ativo ? html`<span class="badge sucesso">${icone("check")}Ativo</span>` : html`<span class="badge">Inativo</span>`}${f.cidade ? html`<span class="badge contorno">${f.cidade}/${f.uf}</span>` : ""}</div></div>
+      <div class="kpis compactos">
+        <div class="kpi"><div class="kpi-topo">Valor contratado</div><div class="valor">${formato.moedaCompacta(f.valor_contratado)}</div></div>
+        <div class="kpi"><div class="kpi-topo">Pedidos</div><div class="valor">${f.pedidos}</div></div>
+        <div class="kpi"><div class="kpi-topo">Taxa de vitória</div><div class="valor">${f.propostas ? Math.round((100 * f.vencedoras) / f.propostas) + "%" : "—"}</div></div>
+      </div>
+      <dl class="pares lista">
+        <div><dt>Pontualidade nas entregas</dt><dd>${indicador(f.pontualidade)}</dd></div>
+        <div><dt>Recebimentos conformes</dt><dd>${indicador(f.conformidade)}</dd></div>
+        <div><dt>Propostas enviadas</dt><dd>${f.propostas} (${f.vencedoras} vencedoras)</dd></div>
+        <div><dt>Contato</dt><dd>${f.contato || "—"}</dd></div>
+        <div><dt>E-mail</dt><dd>${f.email ? html`<a href="mailto:${f.email}" data-externo>${f.email}</a>` : "—"}</dd></div>
+        <div><dt>Telefone</dt><dd>${f.telefone || "—"}</dd></div>
+      </dl>
+      ${f.observacoes ? html`<p class="texto-longo pequeno">${f.observacoes}</p>` : ""}
+      <div><p class="grupo-titulo-secao">Pedidos recentes</p>
+        ${d.pedidos.length ? html`<ul class="lista-itens cartao">${d.pedidos.slice(0, 8).map((p) => html`<li><a class="item-lista" href="/pedidos/${p.id}"><span class="corpo-item"><strong>${p.codigo} · ${p.solicitacao_titulo}</strong><small>${p.setor_nome} · ${formato.data(p.criado_em)}</small></span><span class="lado">${badgePedido(p.status)}<small class="num">${formato.moeda(p.valor_total)}</small></span></a></li>`)}</ul>` : html`<p class="texto-3 pequeno">Nenhum pedido emitido.</p>`}</div>
+      <div><p class="grupo-titulo-secao">Últimas propostas</p>
+        ${d.propostas.length ? html`<ul class="lista-itens cartao">${d.propostas.slice(0, 8).map((c) => html`<li><a class="item-lista" href="/solicitacoes/${c.solicitacao_id}?aba=cotacao"><span class="corpo-item"><strong>${c.solicitacao_codigo} · ${c.solicitacao_titulo}</strong><small>${formato.data(c.criado_em)} · prazo ${c.prazo_entrega_dias} dias</small></span><span class="lado">${c.selecionada ? html`<span class="badge sucesso">${icone("estrela")}Vencedora</span>` : badgeStatus(c.solicitacao_status)}<small class="num">${formato.moeda(c.valor_total)}</small></span></a></li>`)}</ul>` : html`<p class="texto-3 pequeno">Nenhuma proposta registrada.</p>`}</div>
+    </div>`);
+    if (pode("fornecedor.gerenciar")) {
+      m.el.insertAdjacentHTML("beforeend", html`<div class="modal-rodape"><button class="botao secundario" data-editar>${icone("editar")}Editar cadastro</button></div>`.toString());
+      m.el.querySelector("[data-editar]").addEventListener("click", async () => { m.fechar(); const s = await formularioFornecedor(f); if (s) aoEditar?.(); });
+    }
+  } catch (e) { renderizar(m.corpo, vazio("Não foi possível carregar", e.message, "", "alerta")); }
 }
 
 export async function montar({ raiz, consulta }) {
-  const f = { q: consulta.q || "", pagina: Number(consulta.pagina) || 1 };
+  const filtros = { q: consulta.q || "", ativos: consulta.ativos === "1", ordem: consulta.ordem || "valor", pagina: 1 };
   renderizar(raiz, html`
-    <div class="cabecalho-pagina"><div class="titulos"><h1>Fornecedores</h1><p>Empresas habilitadas a participar das cotações.</p></div>
-      <button class="botao" data-novo>${icone("mais")}Novo fornecedor</button></div>
+    ${cabecalho({ titulo: "Fornecedores", sub: "Cadastro, desempenho e histórico de propostas e pedidos",
+      acoes: pode("fornecedor.gerenciar") ? html`<button class="botao" id="novo">${icone("mais")}Novo fornecedor</button>` : "" })}
     <section class="cartao">
-      <form class="barra-filtros" role="search" id="f-forn"><div class="campo largo"><label for="fo-q">Buscar</label>
-        <input id="fo-q" type="search" name="q" value="${f.q}" placeholder="Razão social, nome fantasia ou CNPJ"></div></form>
-      <div id="lista-forn" aria-live="polite"></div>
+      <form class="barra-filtros" id="filtros" role="search">
+        <label class="busca"><span class="sr-only">Buscar</span>${icone("busca")}<input class="entrada" type="search" name="q" value="${filtros.q}" placeholder="Razão social, nome fantasia, cidade ou CNPJ"></label>
+        <select class="entrada" name="ordem" aria-label="Ordenar">${opcoes({ valor: "Maior valor contratado", pedidos: "Mais pedidos", nome: "Nome" }, filtros.ordem)}</select>
+        <label class="checkbox pequeno"><input type="checkbox" name="ativos" ${filtros.ativos ? html`checked` : ""}><span>Somente ativos</span></label>
+      </form>
+      <div id="lista">${carregandoBloco(6)}</div>
     </section>`);
-  const alvo = raiz.querySelector("#lista-forn");
+  const lista = raiz.querySelector("#lista");
+  const form = raiz.querySelector("#filtros");
 
   async function carregar() {
+    atualizarConsulta({ q: filtros.q, ativos: filtros.ativos, ordem: filtros.ordem === "valor" ? "" : filtros.ordem });
     try {
-      const d = await api.get("/fornecedores", { q: f.q, pagina: f.pagina, por_pagina: 50 });
-      if (!d.itens.length) { renderizar(alvo, vazio("Nenhum fornecedor encontrado", "Cadastre fornecedores para lançar cotações.")); return; }
-      renderizar(alvo, html`<div class="tabela-envoltorio"><table class="tabela responsiva"><thead><tr><th>Fornecedor</th><th>CNPJ</th><th>Contato</th><th class="direita">Cotações</th><th>Situação</th><th><span class="sr-only">Ações</span></th></tr></thead>
-        <tbody>${d.itens.map((x) => html`<tr>
-          <td class="principal" data-rotulo="Fornecedor"><strong>${x.razao_social}</strong>${x.nome_fantasia ? html`<span class="sub">${x.nome_fantasia}</span>` : ""}</td>
-          <td data-rotulo="CNPJ" class="mono">${formato.cnpj(x.cnpj)}</td>
-          <td data-rotulo="Contato">${x.contato || "—"}<span class="sub">${[x.email, x.telefone].filter(Boolean).join(" · ")}</span></td>
-          <td data-rotulo="Cotações" class="direita num">${x.cotacoes}<span class="sub">${x.vencedoras} vencedora(s)</span></td>
-          <td data-rotulo="Situação">${x.ativo ? html`<span class="badge sucesso"><span class="ponto"></span>Ativo</span>` : html`<span class="badge"><span class="ponto"></span>Inativo</span>`}</td>
-          <td data-rotulo="Ações"><button class="botao fantasma pequeno" data-editar="${x.id}">${icone("editar")}Editar</button></td></tr>`)}</tbody></table></div>${paginacao(d)}`);
-      alvo._itens = d.itens;
-    } catch (e) { alvo.replaceChildren(erroTela(e, carregar)); }
+      const r = await api.get("/fornecedores", { ...filtros, por_pagina: 50 });
+      renderizar(lista, r.itens.length ? html`<div class="tabela-envoltorio"><table class="tabela responsiva">
+        <thead><tr><th>Fornecedor</th><th>Cidade</th><th class="num">Pedidos</th><th class="num">Valor contratado</th><th>Pontualidade</th><th>Conformidade</th><th>Último pedido</th><th class="col-acao"><span class="sr-only">Ações</span></th></tr></thead>
+        <tbody>${r.itens.map((f) => html`<tr data-fornecedor="${f.id}" tabindex="0">
+          <td class="principal-td"><div class="principal-celula"><strong>${f.nome_fantasia || f.razao_social}</strong><small>${f.razao_social} · <span class="mono">${formato.cnpj(f.cnpj)}</span></small></div></td>
+          <td data-rotulo="Cidade">${f.cidade ? `${f.cidade}/${f.uf}` : "—"}${f.ativo ? "" : html` <span class="badge">Inativo</span>`}</td>
+          <td data-rotulo="Pedidos" class="num">${f.pedidos ?? "—"}</td>
+          <td data-rotulo="Valor contratado" class="num"><strong>${formato.moeda(f.valor_contratado)}</strong></td>
+          <td data-rotulo="Pontualidade">${indicador(f.pontualidade)}</td>
+          <td data-rotulo="Conformidade">${indicador(f.conformidade)}</td>
+          <td data-rotulo="Último pedido" class="texto-3 pequeno nowrap">${f.ultimo_pedido_em ? formato.relativo(f.ultimo_pedido_em) : "—"}</td>
+          <td class="col-acao">${pode("fornecedor.gerenciar") ? html`<button class="botao fantasma pequeno icone" data-editar="${f.id}" aria-label="Editar ${f.razao_social}">${icone("editar")}</button>` : ""}</td>
+        </tr>`)}</tbody></table></div>${paginacao(r)}`
+        : vazio("Nenhum fornecedor encontrado", "Ajuste a busca ou cadastre um novo fornecedor.", "", "fornecedor"));
+      lista._itens = r.itens;
+    } catch (e) { renderizar(lista, vazio("Não foi possível carregar", e.message, "", "alerta")); }
   }
-
-  function formulario(x = null) {
-    const m = modal({
-      titulo: x ? "Editar fornecedor" : "Novo fornecedor",
-      conteudo: html`<form id="f-fornecedor" class="form-grade" novalidate>
-        <div class="campo col-8"><label for="fn-razao">Razão social<span class="obrigatorio" aria-hidden="true">*</span></label><input id="fn-razao" name="razao_social" required maxlength="160" value="${x?.razao_social ?? ""}"></div>
-        <div class="campo col-4"><label for="fn-cnpj">CNPJ<span class="obrigatorio" aria-hidden="true">*</span></label><input id="fn-cnpj" name="cnpj" class="mono" required maxlength="18" value="${x ? formato.cnpj(x.cnpj) : ""}" placeholder="00.000.000/0000-00" aria-describedby="fn-cnpj-ajuda">
-          <p class="ajuda" id="fn-cnpj-ajuda">Aceita o CNPJ alfanumérico vigente desde 2026.</p></div>
-        <div class="campo col-6"><label for="fn-fant">Nome fantasia</label><input id="fn-fant" name="nome_fantasia" maxlength="160" value="${x?.nome_fantasia ?? ""}"></div>
-        <div class="campo col-6"><label for="fn-contato">Pessoa de contato</label><input id="fn-contato" name="contato" maxlength="120" value="${x?.contato ?? ""}"></div>
-        <div class="campo col-6"><label for="fn-email">E-mail</label><input id="fn-email" type="email" name="email" value="${x?.email ?? ""}"></div>
-        <div class="campo col-6"><label for="fn-tel">Telefone</label><input id="fn-tel" type="tel" name="telefone" maxlength="30" value="${x?.telefone ?? ""}"></div>
-        ${x ? html`<label class="checkbox"><input type="checkbox" name="ativo" ${x.ativo ? html`checked` : ""}><span>Fornecedor ativo (disponível para novas cotações)</span></label>` : ""}
-      </form>`,
-      rodape: html`<button class="botao secundario" data-fechar>Cancelar</button><button class="botao" type="submit" form="f-fornecedor">${icone("check")}Salvar</button>`,
-    });
-    const form = m.el.querySelector("#f-fornecedor");
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const d = dadosFormulario(form);
-      const erros = {};
-      if ((d.razao_social || "").length < 2) erros.razao_social = "Informe a razão social";
-      if (!cnpjValido(d.cnpj)) erros.cnpj = "CNPJ inválido (dígito verificador não confere)";
-      mostrarErrosCampos(form, erros);
-      if (Object.keys(erros).length) return;
-      for (const k of ["nome_fantasia", "contato", "email", "telefone"]) if (!d[k]) d[k] = null;
-      try {
-        await comCarregamento(m.el.querySelector('button[type="submit"]'), x ? api.patch(`/fornecedores/${x.id}`, d) : api.post("/fornecedores", d));
-        m.fechar();
-        toast("sucesso", x ? "Fornecedor atualizado" : "Fornecedor cadastrado");
-        carregar();
-      } catch (err) { mostrarErrosCampos(form, err.campos); toastErro(err); }
-    });
-  }
-
-  raiz.querySelector("[data-novo]").addEventListener("click", () => formulario());
-  on(alvo, "click", "[data-editar]", (e, b) => formulario(alvo._itens.find((x) => x.id === b.dataset.editar)));
-  on(alvo, "click", "[data-pagina]", (e, b) => { f.pagina = Number(b.dataset.pagina); atualizarConsulta({ pagina: f.pagina }); carregar(); });
-  const form = raiz.querySelector("#f-forn");
+  const aplicar = debounce(() => { const d = Object.fromEntries(new FormData(form)); Object.assign(filtros, { q: d.q || "", ordem: d.ordem, ativos: d.ativos === "on" }); carregar(); }, 300);
+  form.addEventListener("input", aplicar);
   form.addEventListener("submit", (e) => e.preventDefault());
-  form.addEventListener("input", debounce(() => { f.q = form.q.value.trim(); f.pagina = 1; atualizarConsulta({ q: f.q, pagina: "" }); carregar(); }, 300));
+  on(lista, "click", "[data-editar]", async (e, b) => { e.stopPropagation(); if (await formularioFornecedor(lista._itens.find((f) => f.id === b.dataset.editar))) carregar(); });
+  on(lista, "click", "tr[data-fornecedor]", (e, tr) => { if (!e.target.closest("button")) abrirDetalhe(tr.dataset.fornecedor, carregar); });
+  on(lista, "keydown", "tr[data-fornecedor]", (e, tr) => { if (e.key === "Enter") abrirDetalhe(tr.dataset.fornecedor, carregar); });
+  raiz.querySelector("#novo")?.addEventListener("click", async () => { if (await formularioFornecedor()) carregar(); });
   await carregar();
+  if (consulta.fornecedor) abrirDetalhe(consulta.fornecedor, carregar);
 }
+

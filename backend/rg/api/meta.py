@@ -6,6 +6,7 @@ from flask import Blueprint, current_app, jsonify
 from .. import __version__, rotulos
 from ..contas_teste import CONTAS_TESTE, SENHA_TESTE
 from ..db import db
+from ..seguranca.sessao import requer_login, tx
 
 bp = Blueprint("meta", __name__)
 
@@ -48,3 +49,12 @@ def saude():
         cur.execute("select 1 as ok")
         cur.fetchone()
     return jsonify({"status": "ok"})
+
+
+@bp.get("/parametros")
+@requer_login
+def parametros():
+    """Alçadas e parâmetros do fluxo, para orientar o usuário antes de enviar."""
+    with tx() as cur:
+        cur.execute("select chave, valor from rg.configuracoes")
+        return jsonify({r["chave"]: float(r["valor"]) for r in cur.fetchall()})

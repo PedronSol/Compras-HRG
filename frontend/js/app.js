@@ -14,16 +14,23 @@ definirRota("/perfis", () => import("./telas/acesso.js"), { publica: true, titul
 definirRota("/login", () => import("./telas/acesso.js"), { publica: true, titulo: "Entrar", tela: "login" });
 definirRota("/cadastro", () => import("./telas/acesso.js"), { publica: true, titulo: "Solicitar acesso", tela: "cadastro" });
 definirRota("/trocar-senha", () => import("./telas/acesso.js"), { titulo: "Definir nova senha", tela: "trocarSenha", semShell: true });
-definirRota("/", () => import("./telas/painel.js"), { titulo: "Painel executivo" });
-definirRota("/fila", () => import("./telas/solicitacoes.js"), { titulo: "Minha fila", tela: "fila" });
+definirRota("/", () => import("./telas/painel.js"), { titulo: "Painel" });
+definirRota("/pendencias", () => import("./telas/pendencias.js"), { titulo: "Minhas pendências" });
+definirRota("/alertas", () => import("./telas/alertas.js"), { titulo: "Alertas" });
 definirRota("/solicitacoes", () => import("./telas/solicitacoes.js"), { titulo: "Solicitações" });
-definirRota("/solicitacoes/nova", () => import("./telas/solicitacao-nova.js"), { titulo: "Nova solicitação", papeis: ["gestor"] });
+definirRota("/solicitacoes/nova", () => import("./telas/solicitacao-nova.js"), { titulo: "Nova solicitação", capacidade: "solicitacao.criar" });
+definirRota("/solicitacoes/:id/ajustar", () => import("./telas/solicitacao-nova.js"), { titulo: "Ajustar solicitação", capacidade: "solicitacao.criar" });
 definirRota("/solicitacoes/:id", () => import("./telas/solicitacao-detalhe.js"), { titulo: "Solicitação" });
-definirRota("/servicos", () => import("./telas/servicos.js"), { titulo: "Serviços programados" });
-definirRota("/fornecedores", () => import("./telas/fornecedores.js"), { titulo: "Fornecedores", papeis: ["admin", "compras"] });
-definirRota("/relatorios", () => import("./telas/relatorios.js"), { titulo: "Relatórios" });
-definirRota("/usuarios", () => import("./telas/usuarios.js"), { titulo: "Usuários e acessos", papeis: ["admin"] });
-definirRota("/auditoria", () => import("./telas/auditoria.js"), { titulo: "Auditoria", papeis: ["admin"] });
+definirRota("/aprovacoes", () => import("./telas/aprovacoes.js"), { titulo: "Aprovações" });
+definirRota("/cotacoes", () => import("./telas/cotacoes.js"), { titulo: "Cotações" });
+definirRota("/pedidos", () => import("./telas/pedidos.js"), { titulo: "Pedidos de compra", capacidade: "pedido.ver" });
+definirRota("/pedidos/:id", () => import("./telas/pedido-detalhe.js"), { titulo: "Pedido de compra", capacidade: "pedido.ver" });
+definirRota("/recebimentos", () => import("./telas/recebimentos.js"), { titulo: "Recebimento", capacidade: "recebimento.ver" });
+definirRota("/fornecedores", () => import("./telas/fornecedores.js"), { titulo: "Fornecedores", capacidade: "fornecedor.ver" });
+definirRota("/materiais", () => import("./telas/materiais.js"), { titulo: "Materiais e categorias", capacidade: "material.ver" });
+definirRota("/relatorios", () => import("./telas/relatorios.js"), { titulo: "Relatórios e indicadores", capacidade: "relatorio.ver" });
+definirRota("/usuarios", () => import("./telas/usuarios.js"), { titulo: "Usuários e perfis", papeis: ["admin", "auditoria"] });
+definirRota("/auditoria", () => import("./telas/auditoria.js"), { titulo: "Auditoria", capacidade: "auditoria.ver" });
 definirRota("/notificacoes", () => import("./telas/notificacoes.js"), { titulo: "Notificações" });
 definirRota("/perfil", () => import("./telas/perfil.js"), { titulo: "Meu perfil" });
 
@@ -45,12 +52,12 @@ function removerShell() {
 }
 
 aoMudarRota(async (encontrado, consulta) => {
-  const instituicao = estado.meta?.instituicao || "Hospital Rio Grande";
+  const instituicao = "Compras · " + (estado.meta?.instituicao || "Hospital Rio Grande");
   if (!encontrado) {
     if (!estado.usuario) { navegar("/perfis", { substituir: true }); return null; }
     garantirShell();
     document.title = `Página não encontrada · ${instituicao}`;
-    renderizar($("#tela"), vazio("Página não encontrada", "O endereço acessado não existe.", html`<a class="botao" href="/">${icone("painel")}Ir para o painel</a>`));
+    renderizar($("#tela"), html`<div class="cartao">${vazio("Página não encontrada", "O endereço acessado não existe ou foi movido.", html`<a class="botao" href="/">${icone("painel")}Ir para o painel</a>`, "busca")}</div>`);
     return null;
   }
   const { rota, params } = encontrado;
@@ -76,7 +83,7 @@ aoMudarRota(async (encontrado, consulta) => {
     marcarMenuAtivo(location.pathname);
     alvo = $("#tela");
     if (!podeAcessar(rota)) {
-      renderizar(alvo, vazio("Acesso restrito", "Seu perfil não tem permissão para acessar esta área.", html`<a class="botao secundario" href="/">Voltar ao painel</a>`));
+      renderizar(alvo, html`<div class="cartao">${vazio("Acesso restrito", "Seu perfil não tem permissão para acessar esta área. As permissões são definidas pelo Administrador.", html`<a class="botao secundario" href="/">Voltar ao painel</a>`, "cadeado")}</div>`);
       return null;
     }
     renderizar(alvo, carregando());
@@ -92,6 +99,7 @@ aoMudarRota(async (encontrado, consulta) => {
     }
     return tela || null;
   } catch (erro) {
+    if (erro.name === "AbortError") return null;
     console.error(erro);
     if (erro.status === 401 || erro.codigo === "troca_senha_obrigatoria") return null;
     alvo.replaceChildren(erroTela(erro, () => processar()));

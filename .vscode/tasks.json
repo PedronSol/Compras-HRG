@@ -21,6 +21,15 @@
       "presentation": { "panel": "dedicated" }
     },
     {
+      "label": "Recriar banco de demonstração",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe dev.py --recriar",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "panel": "dedicated" }
+    },
+    {
       "label": "3. Criar administrador",
       "type": "shell",
       "command": "${workspaceFolder}/.venv/Scripts/python.exe dev.py --criar-admin",

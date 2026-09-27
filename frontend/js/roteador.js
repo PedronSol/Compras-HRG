@@ -71,5 +71,7 @@ export function atualizarConsulta(parametros, { substituir = true } = {}) {
 }
 
 export function podeAcessar(rota) {
-  return !rota.papeis || rota.papeis.includes(estado.usuario?.papel);
+  if (rota.papeis && !rota.papeis.includes(estado.usuario?.papel)) return false;
+  if (rota.capacidade && !estado.usuario?.capacidades?.includes(rota.capacidade)) return false;
+  return true;
 }

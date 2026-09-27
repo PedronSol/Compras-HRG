@@ -1,7 +1,7 @@
 {
-  "name": "Hospital Rio Grande — Plataforma Corporativa",
-  "short_name": "RG Hospital",
-  "description": "Solicitações de compras e contratações, aprovações com assinatura digital, serviços programados e relatórios.",
+  "name": "Compras · Hospital Rio Grande",
+  "short_name": "Compras RG",
+  "description": "Solicitações de compra, aprovações por alçada, cotações, pedidos, recebimento e indicadores.",
   "id": "/",
   "start_url": "/?origem=pwa",
   "scope": "/",
@@ -10,7 +10,7 @@
   "orientation": "any",
   "lang": "pt-BR",
   "dir": "ltr",
-  "background_color": "#F7F9FC",
+  "background_color": "#F3F5F8",
   "theme_color": "#2E5C88",
   "categories": ["business", "medical", "productivity"],
   "icons": [
@@ -21,7 +21,7 @@
   ],
   "shortcuts": [
     { "name": "Nova solicitação", "url": "/solicitacoes/nova", "icons": [{ "src": "/assets/icones/icone-192.png", "sizes": "192x192" }] },
-    { "name": "Minha fila", "url": "/fila", "icons": [{ "src": "/assets/icones/icone-192.png", "sizes": "192x192" }] },
-    { "name": "Serviços programados", "url": "/servicos", "icons": [{ "src": "/assets/icones/icone-192.png", "sizes": "192x192" }] }
+    { "name": "Minhas pendências", "url": "/pendencias", "icons": [{ "src": "/assets/icones/icone-192.png", "sizes": "192x192" }] },
+    { "name": "Pedidos de compra", "url": "/pedidos", "icons": [{ "src": "/assets/icones/icone-192.png", "sizes": "192x192" }] }
   ]
 }

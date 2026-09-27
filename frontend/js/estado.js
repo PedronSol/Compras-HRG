@@ -6,6 +6,7 @@ export const estado = {
   meta: null,
   naoLidas: 0,
   pendentesUsuarios: 0,
+  contadores: {},
 };
 
 const ouvintes = new Map();

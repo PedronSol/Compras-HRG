@@ -1,29 +1,31 @@
-// Telas públicas: login, solicitação de acesso (cadastro) e troca obrigatória de senha.
+// Telas públicas: seleção de perfil (demonstração), login, solicitação de acesso e troca obrigatória de senha.
 import { api } from "../api.js";
-import { estado, emitir } from "../estado.js";
+import { estado, emitir, rotulo } from "../estado.js";
 import { navegar } from "../roteador.js";
 import { html, renderizar, dadosFormulario, mostrarErrosCampos, on } from "../ui/dom.js";
 import { icone } from "../ui/icones.js";
-import { aviso, comCarregamento, opcoesSetores, toast } from "../ui/componentes.js";
+import { aviso, comCarregamento, opcoes, opcoesSetores, toast, vazio, ICONE_PAPEL } from "../ui/componentes.js";
 
-function moldura(conteudo) {
+function moldura(conteudo, { largo = false } = {}) {
+  const etapas = estado.meta?.etapas || [];
   return html`<div class="tela-auth">
     <section class="auth-lado" aria-hidden="true">
       <img class="simbolo-fundo" src="/assets/marca/simbolo-rg-branca.svg" alt="">
       <div>
         <img class="logo-auth" src="/assets/marca/logo-rg-hospital-branca.svg" alt="">
-        <h1>Governança de compras, contratações e serviços em um só lugar.</h1>
-        <p>Solicitações com aprovação em três níveis, assinatura digital, SLAs monitorados e auditoria completa.</p>
+        <h1>Compras e Suprimentos do Hospital Rio Grande</h1>
+        <p class="lead">Da necessidade do setor à entrega conferida: cada solicitação com responsáveis, prazos, aprovações por alçada e histórico completo.</p>
+        <div class="auth-fluxo">${etapas.map((e, i) => html`${i ? icone("seta_dir") : ""}<span>${e}</span>`)}</div>
         <ul class="auth-destaques">
-          <li>${icone("assinatura")}<span>Assinaturas eletrônicas com hash SHA-256, data/hora e IP</span></li>
-          <li>${icone("relogio")}<span>SLAs de 3, 7 e 14 dias com alertas automáticos</span></li>
-          <li>${icone("escudo")}<span>Isolamento de dados por setor e conformidade com a LGPD</span></li>
+          <li>${icone("carimbo")}<span><strong>Aprovação por alçada</strong>Gestor do setor, Diretoria acima do limite e Financeiro no pedido de compra.</span></li>
+          <li>${icone("balanca")}<span><strong>Cotações comparadas</strong>Propostas registradas pelo comprador, com mapa de preços por item.</span></li>
+          <li>${icone("escudo")}<span><strong>Dados protegidos no hospital</strong>Sem integração com serviços de IA. Assinatura eletrônica e trilha de auditoria imutável.</span></li>
         </ul>
       </div>
       <p class="auth-rodape">© ${new Date().getFullYear()} Hospital Rio Grande · Uso restrito a colaboradores autorizados</p>
     </section>
     <main class="auth-form-area" id="conteudo">
-      <div class="auth-cartao">
+      <div class="auth-cartao ${largo ? "largo" : ""}">
         <img class="logo-mobile" src="/assets/marca/logo-rg-hospital-primaria.svg" alt="Hospital Rio Grande">
         ${conteudo}
       </div>
@@ -73,72 +75,77 @@ function ativarMedidor(raiz, nomeCampo) {
 const medidorSenha = html`<div class="forca-senha" data-forca data-nivel="0" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
   <p class="ajuda" aria-live="polite">Força: <span data-forca-texto>—</span></p>`;
 
-// ------------------------------------------------------------------ escolha de perfil
-const PERFIS = {
-  admin: { icone: "escudo", titulo: "Administração", desc: "Aprova as solicitações (1º nível), gerencia usuários, acessos e auditoria." },
-  compras: { icone: "carrinho", titulo: "Compras", desc: "Recebe as solicitações aprovadas, faz cotações e homologa a compra (aprovação final)." },
-  gestor: { icone: "predio", titulo: "Gestor de setor", desc: "Abre solicitações de compra e serviço do seu setor e acompanha as aprovações." },
-};
+// ------------------------------------------------------------------ escolha de perfil (demonstração)
+async function entrar(email, senha, consulta = {}) {
+  const r = await api.post("/auth/login", { email, senha });
+  estado.usuario = r.usuario;
+  estado.csrf = r.csrf_token;
+  const retorno = consulta.retorno && consulta.retorno.startsWith("/") && !consulta.retorno.startsWith("//") ? consulta.retorno : "/";
+  navegar(r.usuario.troca_senha_obrigatoria ? "/trocar-senha" : retorno, { substituir: true });
+}
 
-async function perfis({ raiz }) {
+async function perfis({ raiz, consulta }) {
+  const contas = estado.meta?.contas_teste || [];
+  if (!contas.length) { navegar("/login", { substituir: true }); return; }
+  const descricoes = estado.meta.rotulos.papel_descricao;
   renderizar(raiz, moldura(html`
-    <h2>Como você quer entrar?</h2>
-    <p class="sub">Escolha o seu perfil de acesso para continuar.</p>
-    <div class="pilha" style="gap:12px">
-      ${Object.entries(PERFIS).map(([papel, p]) => html`
-        <a class="perfil-opcao" href="/login?perfil=${papel}">
-          <span class="perfil-icone">${icone(p.icone)}</span>
-          <span><strong>${p.titulo}</strong><small>${p.desc}</small></span>
-          <span class="perfil-seta">${icone("seta_dir")}</span>
-        </a>`)}
+    <div>
+      <span class="selo-demo">${icone("sparkle")}Ambiente de demonstração · dados 100% fictícios</span>
+      <h2>Escolha um perfil para explorar</h2>
+      <p class="sub">Cada perfil vê e executa apenas o que lhe compete no fluxo de compras. Troque de perfil a qualquer momento pelo menu do usuário.</p>
     </div>
-    <hr>
-    <p class="pequeno texto-3">Ainda não tem acesso? <a href="/cadastro">Solicite seu cadastro</a>.</p>`));
+    <div id="aviso-login" aria-live="assertive"></div>
+    <div class="perfis-demo">
+      ${contas.map((c) => html`<button type="button" class="perfil-demo" data-papel="${c.papel}" data-email="${c.email}" data-senha="${c.senha}">
+        <span class="icone-perfil">${icone(ICONE_PAPEL[c.papel] || "perfil")}</span>
+        <span><strong>${rotulo("papel", c.papel)}</strong><span class="nome-perfil">${c.nome} · ${c.cargo}</span><p>${descricoes[c.papel]}</p></span>
+      </button>`)}
+    </div>
+    <p class="pequeno texto-3">Senha de todos os perfis de demonstração: <code>${contas[0].senha}</code> · <a href="/login">Entrar com e-mail e senha</a></p>`, { largo: true }));
+  on(raiz, "click", "[data-email]", async (e, b) => {
+    b.setAttribute("aria-busy", "true");
+    raiz.querySelectorAll(".perfil-demo").forEach((x) => { x.disabled = true; });
+    try {
+      await entrar(b.dataset.email, b.dataset.senha, consulta);
+      toast("info", `Você entrou como ${rotulo("papel", b.dataset.papel)}`, "Ambiente de demonstração com dados fictícios.");
+    } catch (erro) {
+      raiz.querySelectorAll(".perfil-demo").forEach((x) => { x.disabled = false; });
+      renderizar(raiz.querySelector("#aviso-login"), aviso("perigo", erro.message));
+    }
+  });
 }
 
 // ------------------------------------------------------------------ login
 async function login({ raiz, consulta }) {
-  const perfilEscolhido = PERFIS[consulta.perfil] ? consulta.perfil : null;
-  const contasTeste = (estado.meta?.contas_teste || []).filter((c) => !perfilEscolhido || c.papel === perfilEscolhido);
+  const demo = (estado.meta?.contas_teste || []).length > 0;
   renderizar(raiz, moldura(html`
-    <h2>Acessar a plataforma</h2>
-    <p class="sub">${perfilEscolhido ? html`Perfil: <strong>${PERFIS[perfilEscolhido].titulo}</strong> · <a href="/perfis">trocar perfil</a>` : "Use seu e-mail institucional e senha."}</p>
-    <div id="aviso-login" aria-live="assertive"></div>
-    <form id="form-login" class="pilha" novalidate>
-      <div class="campo"><label for="email">E-mail institucional<span class="obrigatorio" aria-hidden="true">*</span></label>
-        <input id="email" name="email" type="email" autocomplete="username" required inputmode="email" autofocus></div>
-      ${campoSenha("senha", "Senha")}
-      <button class="botao bloco" type="submit">${icone("cadeado")}Entrar</button>
-    </form>
-    ${contasTeste.length ? html`<div class="conta-teste" role="note">
-      <h3>Login de teste</h3>
-      ${contasTeste.map((c) => html`<dl>
-        <dt>Nome</dt><dd>${c.nome}</dd>
-        <dt>E-mail</dt><dd><code>${c.email}</code></dd>
-        <dt>Senha</dt><dd><code>${c.senha}</code></dd>
-        <button type="button" class="botao secundario pequeno" data-preencher="${c.email}" data-senha="${c.senha}">${icone("chave")}Preencher</button>
-      </dl>`)}
-    </div>` : ""}
-    <hr>
-    <p class="pequeno texto-3">Ainda não tem acesso? <a href="/cadastro">Solicite seu cadastro</a>. Esqueceu a senha? Procure a Administração do hospital para redefini-la com segurança.</p>`));
+    <div><h2>Acessar o sistema de Compras</h2>
+    <p class="sub">Use seu e-mail institucional e senha.</p></div>
+    <div class="auth-painel">
+      <div id="aviso-login" aria-live="assertive"></div>
+      <form id="form-login" class="pilha" novalidate>
+        <div class="campo"><label for="email">E-mail institucional<span class="obrigatorio" aria-hidden="true">*</span></label>
+          <input id="email" name="email" type="email" autocomplete="username" required inputmode="email" autofocus value="${consulta.email || ""}"></div>
+        ${campoSenha("senha", "Senha")}
+        <button class="botao bloco grande" type="submit">${icone("cadeado")}Entrar</button>
+      </form>
+      ${demo ? html`<a class="botao secundario bloco" href="/perfis">${icone("usuarios")}Escolher um perfil de demonstração</a>` : ""}
+    </div>
+    <p class="pequeno texto-3">Ainda não tem acesso? <a href="/cadastro">Solicite seu cadastro</a>. Esqueceu a senha? O Administrador do sistema redefine com segurança.</p>
+    <p class="nota-privacidade">${icone("escudo")}<span>Conexão protegida, sessão com expiração automática e registro de acessos. Nenhum dado é enviado a serviços externos de inteligência artificial.</span></p>`));
   const form = raiz.querySelector("#form-login");
   ativarVerSenha(form);
-  on(raiz, "click", "[data-preencher]", (e, b) => { form.email.value = b.dataset.preencher; form.senha.value = b.dataset.senha; form.querySelector('button[type="submit"]').focus(); });
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const dados = dadosFormulario(form);
     const erros = {};
     if (!dados.email) erros.email = "Informe seu e-mail";
-    if (!dados.senha) erros.senha = "Informe sua senha";
+    if (!form.senha.value) erros.senha = "Informe sua senha";
     mostrarErrosCampos(form, erros);
     if (Object.keys(erros).length) return;
     const botao = form.querySelector('button[type="submit"]');
     try {
-      const r = await comCarregamento(botao, api.post("/auth/login", { email: dados.email, senha: form.senha.value }));
-      estado.usuario = r.usuario;
-      estado.csrf = r.csrf_token;
-      const retorno = consulta.retorno && consulta.retorno.startsWith("/") && !consulta.retorno.startsWith("//") ? consulta.retorno : "/";
-      navegar(r.usuario.troca_senha_obrigatoria ? "/trocar-senha" : retorno, { substituir: true });
+      await comCarregamento(botao, entrar(dados.email, form.senha.value, consulta));
     } catch (erro) {
       form.senha.value = "";
       const tipo = erro.status === 423 || erro.codigo?.startsWith("conta_") ? "alerta" : "perigo";
@@ -153,21 +160,21 @@ async function login({ raiz, consulta }) {
 async function cadastro({ raiz }) {
   const setores = estado.meta.setores;
   renderizar(raiz, moldura(html`
-    <h2>Solicitar acesso</h2>
-    <p class="sub">Seu cadastro será analisado pela Administração antes da liberação.</p>
+    <div><h2>Solicitar acesso</h2>
+    <p class="sub">Seu cadastro será analisado pelo Administrador do sistema antes da liberação.</p></div>
     <div id="aviso-cadastro" aria-live="assertive"></div>
-    <form id="form-cadastro" class="form-grade" novalidate>
+    <form id="form-cadastro" class="form-grade auth-painel" novalidate>
       <div class="campo"><label for="nome">Nome completo<span class="obrigatorio" aria-hidden="true">*</span></label>
         <input id="nome" name="nome" autocomplete="name" required minlength="3" maxlength="120"></div>
       <div class="campo"><label for="email">E-mail institucional<span class="obrigatorio" aria-hidden="true">*</span></label>
         <input id="email" name="email" type="email" autocomplete="email" required></div>
       <div class="campo col-6"><label for="papel">Perfil de acesso<span class="obrigatorio" aria-hidden="true">*</span></label>
-        <select id="papel" name="papel" required><option value="gestor">Gestor de setor</option><option value="compras">Compras</option></select></div>
+        <select id="papel" name="papel" required>${opcoes({ solicitante: "Solicitante", gestor: "Gestor de setor", comprador: "Comprador", financeiro: "Financeiro", recebimento: "Recebimento" }, "solicitante")}</select></div>
       <div class="campo col-6"><label for="setor_codigo">Setor<span class="obrigatorio" aria-hidden="true">*</span></label>
         <select id="setor_codigo" name="setor_codigo" required>${opcoesSetores(setores, "", { vazio: "Selecione…", somenteOperacionais: true })}</select></div>
       <div class="campo col-6"><label for="cargo">Cargo</label><input id="cargo" name="cargo" maxlength="80" autocomplete="organization-title"></div>
       <div class="campo col-6"><label for="telefone">Telefone</label><input id="telefone" name="telefone" type="tel" inputmode="tel" autocomplete="tel" maxlength="20" placeholder="(51) 99999-9999"></div>
-      ${campoSenha("senha", "Senha", { autocomplete: "new-password", ajuda: `Mínimo de ${estado.meta.limites.senha_min} caracteres, combinando maiúsculas, minúsculas, números e símbolos. Senhas vazadas publicamente são recusadas.` })}
+      ${campoSenha("senha", "Senha", { autocomplete: "new-password", ajuda: `Mínimo de ${estado.meta.limites.senha_min} caracteres, combinando maiúsculas, minúsculas, números e símbolos.` })}
       <div>${medidorSenha}</div>
       <div class="campo"><label for="confirmacao">Confirme a senha<span class="obrigatorio" aria-hidden="true">*</span></label>
         <input id="confirmacao" name="confirmacao" type="password" autocomplete="new-password" required maxlength="128"></div>
@@ -184,8 +191,9 @@ async function cadastro({ raiz }) {
   const papel = form.querySelector("#papel");
   const setor = form.querySelector("#setor_codigo");
   papel.addEventListener("change", () => {
-    const operacionais = papel.value === "gestor";
-    renderizar(setor, opcoesSetores(setores, operacionais ? "" : "suprimentos", { vazio: "Selecione…", somenteOperacionais: operacionais }));
+    const operacionais = ["gestor", "solicitante"].includes(papel.value);
+    const padrao = { comprador: "suprimentos", recebimento: "suprimentos", financeiro: "financeiro" }[papel.value] || "";
+    renderizar(setor, opcoesSetores(setores, padrao, { vazio: "Selecione…", somenteOperacionais: operacionais }));
   });
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -205,8 +213,7 @@ async function cadastro({ raiz }) {
       const r = await comCarregamento(form.querySelector('button[type="submit"]'), api.post("/auth/cadastro", dados));
       renderizar(raiz.querySelector(".auth-cartao"), html`
         <img class="logo-mobile" src="/assets/marca/logo-rg-hospital-primaria.svg" alt="Hospital Rio Grande">
-        <div class="vazio">${icone("check_circulo")}<h2>Solicitação enviada</h2><p>${r.mensagem}</p>
-        <a class="botao" href="/login">Voltar para o login</a></div>`);
+        <div class="auth-painel">${vazio("Solicitação enviada", r.mensagem, html`<a class="botao" href="/login">Voltar para o login</a>`, "check_circulo")}</div>`);
     } catch (erro) {
       renderizar(raiz.querySelector("#aviso-cadastro"), aviso("perigo", erro.message));
       mostrarErrosCampos(form, erro.campos);
@@ -217,10 +224,10 @@ async function cadastro({ raiz }) {
 // ------------------------------------------------------------------ troca obrigatória
 async function trocarSenha({ raiz }) {
   renderizar(raiz, moldura(html`
-    <h2>Defina uma nova senha</h2>
-    <p class="sub">Por segurança, substitua a senha temporária antes de continuar.</p>
+    <div><h2>Defina uma nova senha</h2>
+    <p class="sub">Por segurança, substitua a senha temporária antes de continuar.</p></div>
     <div id="aviso-troca" aria-live="assertive"></div>
-    <form id="form-troca" class="pilha" novalidate>
+    <form id="form-troca" class="pilha auth-painel" novalidate>
       ${campoSenha("senha_atual", "Senha atual (temporária)")}
       ${campoSenha("nova_senha", "Nova senha", { autocomplete: "new-password", ajuda: "Não é permitido reutilizar nenhuma das últimas 5 senhas." })}
       ${medidorSenha}
@@ -240,7 +247,7 @@ async function trocarSenha({ raiz }) {
       await comCarregamento(form.querySelector('button[type="submit"]'),
         api.post("/auth/senha", { senha_atual: form.senha_atual.value, nova_senha: form.nova_senha.value }));
       estado.usuario.troca_senha_obrigatoria = false;
-      toast("sucesso", "Senha atualizada", "Bem-vindo(a) à plataforma.");
+      toast("sucesso", "Senha atualizada", "Bem-vindo(a) ao sistema de Compras.");
       navegar("/", { substituir: true });
     } catch (erro) {
       renderizar(raiz.querySelector("#aviso-troca"), aviso("perigo", erro.message));

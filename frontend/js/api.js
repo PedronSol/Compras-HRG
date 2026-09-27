@@ -3,6 +3,12 @@ import { estado, emitir } from "./estado.js";
 
 const BASE = "/api/v1";
 
+// Ao sair/recarregar a página, as requisições pendentes são canceladas pelo navegador: não é erro de rede.
+let saindoDaPagina = false;
+window.addEventListener("pagehide", () => { saindoDaPagina = true; });
+window.addEventListener("beforeunload", () => { saindoDaPagina = true; });
+window.addEventListener("pageshow", () => { saindoDaPagina = false; });
+
 export class ErroApi extends Error {
   constructor(status, corpo) {
     const erro = corpo?.erro || {};
@@ -37,7 +43,7 @@ async function requisitar(metodo, caminho, { corpo, consulta, formulario, bruto 
   try {
     resposta = await fetch(url, { method: metodo, headers: cabecalhos, body, credentials: "same-origin", signal: sinal });
   } catch (e) {
-    if (e.name === "AbortError") throw e;
+    if (e.name === "AbortError" || saindoDaPagina) throw Object.assign(new Error("Requisição interrompida"), { name: "AbortError" });
     throw new ErroApi(0, { erro: { codigo: "rede", mensagem: navigator.onLine ? "Não foi possível contatar o servidor." : "Sem conexão com a internet." } });
   }
   if (bruto && resposta.ok) return resposta;
@@ -56,6 +62,7 @@ export const api = {
   get: (caminho, consulta, opcoes = {}) => requisitar("GET", caminho, { consulta, ...opcoes }),
   post: (caminho, corpo) => requisitar("POST", caminho, { corpo: corpo ?? {} }),
   patch: (caminho, corpo) => requisitar("PATCH", caminho, { corpo }),
+  put: (caminho, corpo) => requisitar("PUT", caminho, { corpo }),
   delete: (caminho) => requisitar("DELETE", caminho),
   enviarFormulario: (caminho, formData) => requisitar("POST", caminho, { formulario: formData }),
 

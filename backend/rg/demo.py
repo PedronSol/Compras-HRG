@@ -10,6 +10,7 @@ Executado com uma conexão de dono do schema: as triggers de usuário são desat
 from __future__ import annotations
 
 import random
+import unicodedata
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
@@ -180,15 +181,25 @@ TITULOS = {
     "Serviços técnicos": ["Contratação de {item}", "Serviço de {item}"],
 }
 
-JUSTIFICATIVAS = [
-    "Estoque atual abaixo do nível mínimo de segurança, com risco de desabastecimento nas próximas semanas.",
-    "Aumento da taxa de ocupação do setor exige reposição antecipada para manter a continuidade assistencial.",
-    "Equipamento atual apresenta falhas recorrentes e custo de manutenção elevado, comprometendo a segurança do paciente.",
-    "Atendimento a exigência de acreditação hospitalar e às normas vigentes da vigilância sanitária.",
-    "Consumo médio mensal superior ao previsto; a reposição evita compras emergenciais com preço maior.",
-    "Adequação do setor ao novo protocolo institucional aprovado pela comissão de qualidade.",
-    "Substituição de itens com validade próxima do vencimento e padronização de marca junto ao setor.",
-]
+JUSTIFICATIVAS = {
+    "material": [
+        "Estoque atual abaixo do nível mínimo de segurança, com risco de desabastecimento nas próximas semanas.",
+        "Aumento da taxa de ocupação do setor exige reposição antecipada para manter a continuidade assistencial.",
+        "Consumo médio mensal superior ao previsto; a reposição evita compras emergenciais com preço maior.",
+        "Substituição de itens com validade próxima do vencimento e padronização de marca junto ao setor.",
+        "Adequação do setor ao novo protocolo institucional aprovado pela comissão de qualidade.",
+    ],
+    "equipamento": [
+        "Equipamento atual apresenta falhas recorrentes e custo de manutenção elevado, comprometendo a segurança do paciente.",
+        "Atendimento a exigência de acreditação hospitalar e às normas vigentes da vigilância sanitária.",
+        "Ampliação da capacidade de atendimento do setor prevista no planejamento anual.",
+    ],
+    "servico": [
+        "Manutenção preventiva prevista no plano anual, obrigatória para manter a certificação dos equipamentos.",
+        "Atendimento a exigência de acreditação hospitalar e às normas vigentes da vigilância sanitária.",
+        "Contrato anterior encerrado; o serviço é necessário para a continuidade da operação do setor.",
+    ],
+}
 PAGAMENTOS = ["28 dias", "30 dias", "30/60 dias", "À vista com 3% de desconto", "45 dias", "30/60/90 dias"]
 MOTIVOS_DEVOLUCAO = ["Detalhar a especificação técnica dos itens e anexar ao menos um orçamento de referência.",
                      "Revisar as quantidades: o consumo dos últimos 3 meses indica volume menor."]
@@ -359,7 +370,7 @@ class Semeador:
         for i, (razao, fantasia, cidade, uf, contato, cats) in enumerate(FORNECEDORES):
             fid = str(uuid.uuid4())
             cnpj = cnpj_ficticio(self.r)
-            dominio = fantasia.lower().replace(" ", "").replace("ú", "u").replace("â", "a")
+            dominio = unicodedata.normalize("NFKD", fantasia.lower()).encode("ascii", "ignore").decode().replace(" ", "")
             self.exec("""insert into rg.fornecedores (id, razao_social, nome_fantasia, cnpj, email, telefone, contato, cidade,
                             uf, ativo, criado_em) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                       (fid, razao, fantasia, cnpj, f"vendas@{dominio}.demo", f"(5{self.r.randint(1, 4)}) 3{self.r.randint(100, 999)}-{self.r.randint(1000, 9999)}",
@@ -443,7 +454,7 @@ class Semeador:
         prazo = r.choice([3, 5, 7, 10, 15]) if not caro else r.choice([10, 15, 20, 30])
         t["ped_diretoria"] = t["financeiro"] + r.uniform(3, 24)
         t["enviado"] = t["financeiro"] + r.uniform(1, 10)
-        t["receb1"] = t["enviado"] + prazo * 24 + r.uniform(-30, 40)
+        t["receb1"] = t["enviado"] + prazo * 24 + (r.uniform(-60, 6) if r.random() < 0.85 else r.uniform(30, 90))
         t["receb2"] = t["receb1"] + r.uniform(48, 120)
         etapa_final = {"aguardando_gestor": "criacao", "devolvida": "gestor", "reprovada": "gestor", "cancelada": "criacao",
                        "aguardando_diretoria": "gestor", "aprovada": "aprovada", "em_cotacao": "cotacao",
@@ -480,7 +491,7 @@ class Semeador:
                        local_entrega, data_necessidade, solicitante_id, aberta_por_gestor, sla_prazo_limite, criado_em,
                        atualizado_em)
                      values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                  (sid, "TMP-" + sid[:12], tipo, titulo, r.choice(JUSTIFICATIVAS), setor, urgencia, status,
+                  (sid, "TMP-" + sid[:12], tipo, titulo, r.choice(JUSTIFICATIVAS[tipo]), setor, urgencia, status,
                    r.choice([None, "Almoxarifado central", f"Posto de enfermagem — {setor.replace('_', ' ')}"]),
                    T("criacao").astimezone(TZ).date() + timedelta(days=sla + r.randint(3, 20)), solicitante["id"],
                    aberta_gestor, T("criacao") + timedelta(days=sla), T("criacao"), T("criacao")))

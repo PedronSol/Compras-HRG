@@ -5,14 +5,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     RG_AMBIENTE=producao \
+    RG_MODO_DEMO=false \
+    RG_HIBP_ENABLED=false \
     RG_FRONTEND_DIR=/app/frontend \
     RG_STORAGE_DIR=/data/storage
 
-# Tesseract com idioma português (OCR principal) e bibliotecas do OpenCV usadas pelo RapidOCR (reserva).
-RUN apt-get update \
- && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-por libgl1 libglib2.0-0 \
- && rm -rf /var/lib/apt/lists/* \
- && useradd --system --uid 10001 --home /app rg \
+# Sem OCR, IA ou serviços externos: a imagem contém apenas Python e as dependências da API.
+RUN useradd --system --uid 10001 --home /app rg \
  && mkdir -p /data/storage && chown -R rg /data
 
 WORKDIR /app
