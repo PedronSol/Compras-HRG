@@ -15,9 +15,6 @@ from ..db import db
 
 log = logging.getLogger("rg.tempo_real")
 
-STATUS_COMPRAS = {"aprovado_adm", "em_cotacao", "aprovado", "rejeitado_compras"}
-
-
 class Conexao:
     __slots__ = ("ws", "usuario_id", "papel", "setor", "lock", "token")
 
@@ -39,21 +36,20 @@ class Conexao:
 
 
 def pode_ver(conexao: Conexao, evento: dict) -> bool:
+    """Replica no tempo real o mesmo escopo de visibilidade do RLS (o evento não carrega dados sensíveis)."""
     tabela = evento.get("tabela")
     if tabela == "notificacoes":
         return evento.get("destinatario") == conexao.usuario_id
     if tabela == "usuarios":
-        return conexao.papel == "admin" or evento.get("usuario") == conexao.usuario_id
-    if conexao.papel == "admin":
+        return conexao.papel in ("admin", "auditoria") or evento.get("usuario") == conexao.usuario_id
+    if conexao.papel in ("admin", "financeiro", "diretoria", "auditoria"):
         return True
-    setor = evento.get("setor")
-    if tabela == "servicos_programados" or (tabela == "anexos" and evento.get("servico_id")):
-        return conexao.papel == "compras" or setor == conexao.setor
-    if tabela in ("solicitacoes", "cotacoes", "anexos"):
-        if conexao.papel == "gestor":
-            return setor == conexao.setor
-        if conexao.papel == "compras":
-            return evento.get("status") in STATUS_COMPRAS
+    if conexao.papel in ("solicitante", "gestor"):
+        return evento.get("setor") == conexao.setor
+    if conexao.papel == "comprador":
+        return bool(evento.get("aprovada"))
+    if conexao.papel == "recebimento":
+        return evento.get("status") in ("em_pedido", "recebida_parcial", "concluida")
     return False
 
 
@@ -146,7 +142,7 @@ class Agendador:
             cur.execute("select pg_try_advisory_xact_lock(727002) as ok")
             if not cur.fetchone()["ok"]:
                 return 0
-            cur.execute("select rg.processar_alertas_sla() as qtd")
+            cur.execute("select rg.processar_alertas() as qtd")
             qtd = cur.fetchone()["qtd"]
             cur.execute("delete from rg.sessoes where expira_em < now() - interval '30 days'"
                         " or revogada_em < now() - interval '30 days'")

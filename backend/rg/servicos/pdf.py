@@ -20,8 +20,8 @@ from reportlab.platypus import (BaseDocTemplate, Frame, KeepTogether, PageTempla
                                 TableStyle)
 
 from .. import marca
-from ..rotulos import (CATEGORIA_SERVICO, PERIODICIDADE, SITUACAO_SERVICO, SLA_SITUACAO, STATUS_SOLICITACAO,
-                       TIPO_SOLICITACAO, URGENCIA, ACAO_ASSINATURA)
+from ..rotulos import (ACAO_ASSINATURA, DECISAO_APROVACAO, NIVEL_APROVACAO, PAPEL, SITUACAO_RECEBIMENTO,
+                       SLA_SITUACAO, STATUS_PEDIDO, STATUS_SOLICITACAO, TIPO_SOLICITACAO, URGENCIA)
 
 PRIMARIA = colors.HexColor("#2E5C88")
 DESTAQUE = colors.HexColor("#8EB7E5")
@@ -95,7 +95,7 @@ class _Documento(BaseDocTemplate):
         tamanho = landscape(A4) if paisagem else A4
         super().__init__(buffer, pagesize=tamanho, leftMargin=16 * mm, rightMargin=16 * mm,
                          topMargin=30 * mm, bottomMargin=20 * mm, title=titulo, author=instituicao,
-                         subject=titulo, creator="RG Hospital — Plataforma Corporativa",
+                         subject=titulo, creator="Hospital Rio Grande — Compras RG",
                          keywords=f"verificacao:{codigo}")
         self.titulo_doc = titulo
         self.autor = autor
@@ -315,6 +315,33 @@ def _montar(elementos, *, titulo: str, autor: str, instituicao: str, codigo: str
 # ---------------------------------------------------------------------------
 # Relatórios
 # ---------------------------------------------------------------------------
+def _qtd(v) -> str:
+    if v is None:
+        return "—"
+    d = Decimal(str(v)).normalize()
+    texto = f"{d:f}"
+    if "." in texto:
+        texto = texto.rstrip("0").rstrip(".")
+    return texto.replace(".", ",")
+
+
+def _cnpj_fmt(c: str | None) -> str:
+    if not c or len(c) != 14:
+        return c or "—"
+    return f"{c[:2]}.{c[2:5]}.{c[5:8]}/{c[8:12]}-{c[12:]}"
+
+
+def _mov(h: dict) -> str:
+    rotulos = STATUS_PEDIDO if h["acao"] == "pedido_status" else STATUS_SOLICITACAO
+    if h["acao"] in ("mudanca_status", "pedido_status"):
+        prefixo = "Pedido: " if h["acao"] == "pedido_status" else ""
+        return f"{prefixo}{rotulos.get(h['status_de'], h['status_de'])} → {rotulos.get(h['status_para'], h['status_para'])}"
+    if h["acao"] == "recebimento":
+        return f"Recebimento ({SITUACAO_RECEBIMENTO.get(h['status_para'], h['status_para'])})"
+    return {"criacao": "Abertura da solicitação", "edicao": "Ajuste do conteúdo",
+            "pedido_emitido": "Pedido de compra emitido"}.get(h["acao"], h["acao"])
+
+
 def dossie_solicitacao(detalhe: dict, *, autor: str, instituicao: str, tz: str) -> tuple[bytes, str]:
     s = detalhe["solicitacao"]
     codigo = codigo_verificacao({"tipo": "dossie", "solicitacao": s, "assinaturas": detalhe["assinaturas"],
@@ -328,86 +355,143 @@ def dossie_solicitacao(detalhe: dict, *, autor: str, instituicao: str, tz: str) 
             ("Tipo", esc(TIPO_SOLICITACAO.get(s["tipo"], s["tipo"]))),
             ("Setor", esc(s["setor_nome"])),
             ("Urgência", esc(URGENCIA.get(s["urgencia"], s["urgencia"]))),
-            ("Gestor solicitante", esc(s["gestor_nome"])),
+            ("Solicitante", esc(s["solicitante_nome"])),
             ("Comprador responsável", esc(s["comprador_nome"])),
             ("Aberta em", data_hora(s["criado_em"], tz)),
-            ("Prazo SLA", f"{data_hora(s['sla_prazo_limite'], tz)} — {esc(SLA_SITUACAO.get(s['sla_situacao'], s['sla_situacao']))}"),
+            ("Prazo de atendimento", f"{data_hora(s['sla_prazo_limite'], tz)} — "
+                                     f"{esc(SLA_SITUACAO.get(s['sla_situacao'], s['sla_situacao']))}"),
             ("Valor estimado", moeda(s["valor_estimado"])),
-            ("Valor final homologado", moeda(s["valor_final_aprovado"])),
+            ("Valor contratado", moeda(s["valor_final"])),
+            ("Fornecedor", esc(s["fornecedor_nome"])),
+            ("Pedido de compra", esc(s["pedido_codigo"])),
         ], largura, 2),
-        Paragraph("Descrição", E["h2"]), Paragraph(esc(s["descricao"]), E["normal"]),
-        Paragraph("Justificativa do gestor", E["h2"]), Paragraph(esc(s["justificativa"]), E["normal"]),
     ]
-    pareceres = [
-        ("Parecer da Administração", s.get("justificativa_adm")),
-        ("Justificativa da alteração de urgência", s.get("justificativa_urgencia")),
-        ("Motivo da solicitação de nova cotação", s.get("motivo_nova_cotacao")),
-        ("Parecer de Compras", s.get("justificativa_compras")),
-        ("Motivo do cancelamento", s.get("motivo_cancelamento")),
-    ]
-    for rotulo, texto in pareceres:
+    if s.get("descricao"):
+        el += [Paragraph("Descrição", E["h2"]), Paragraph(esc(s["descricao"]), E["normal"])]
+    el += [Paragraph("Justificativa", E["h2"]), Paragraph(esc(s["justificativa"]), E["normal"])]
+    for rotulo, texto in (("Justificativa da escolha do fornecedor", s.get("justificativa_escolha")),
+                          ("Motivo da devolução", s.get("motivo_devolucao")),
+                          ("Motivo da reprovação", s.get("motivo_reprovacao")),
+                          ("Motivo do cancelamento", s.get("motivo_cancelamento"))):
         if texto:
             el += [Paragraph(rotulo, E["h2"]), Paragraph(esc(texto), E["normal"])]
 
-    anexos = [a for a in detalhe["anexos"]]
+    el.append(Paragraph("Itens solicitados", E["h2"]))
+    el.append(_tabela(["#", "Descrição", "Un.", "Qtd.", "Unitário estimado", "Total estimado"],
+                      [[i + 1, it["descricao"], it["unidade"], _qtd(it["quantidade"]), moeda(it["valor_unitario_estimado"]),
+                        moeda(it["total_estimado"])] for i, it in enumerate(detalhe["itens"])],
+                      [largura * f for f in (0.05, 0.45, 0.07, 0.1, 0.16, 0.17)]))
+
+    el.append(Paragraph("Aprovações", E["h2"]))
+    if detalhe["aprovacoes"]:
+        el.append(_tabela(["Data/hora", "Nível", "Decisão", "Responsável", "Parecer"],
+                          [[data_hora(a["criado_em"], tz), NIVEL_APROVACAO.get(a["nivel"], a["nivel"]),
+                            DECISAO_APROVACAO.get(a["decisao"], a["decisao"]), a["usuario_nome"], a["parecer"] or ""]
+                           for a in detalhe["aprovacoes"]],
+                          [largura * f for f in (0.15, 0.15, 0.12, 0.2, 0.38)]))
+    else:
+        el.append(Paragraph("Nenhuma decisão registrada.", E["normal"]))
+
+    el.append(Paragraph("Propostas de fornecedores", E["h2"]))
+    if detalhe["cotacoes"]:
+        el.append(_tabela(["Fornecedor", "CNPJ", "Valor total", "Frete", "Prazo", "Pagamento", "Vencedora"],
+                          [[c["nome_fantasia"] or c["razao_social"], _cnpj_fmt(c["cnpj"]), moeda(c["valor_total"]),
+                            moeda(c["frete"]), f"{c['prazo_entrega_dias']} dias", c["condicoes_pagamento"] or "—",
+                            "Sim" if c["selecionada"] else ""] for c in detalhe["cotacoes"]],
+                          [largura * f for f in (0.24, 0.18, 0.13, 0.1, 0.09, 0.16, 0.1)]))
+    else:
+        el.append(Paragraph("Nenhuma proposta registrada.", E["normal"]))
+
+    if detalhe["pedidos"]:
+        el.append(Paragraph("Pedidos de compra", E["h2"]))
+        el.append(_tabela(["Pedido", "Fornecedor", "Status", "Valor", "Previsão", "Recebido"],
+                          [[p["codigo"], p["fornecedor_fantasia"] or p["fornecedor_nome"], STATUS_PEDIDO.get(p["status"]),
+                            moeda(p["valor_total"]), data_hora(p["data_prevista_entrega"]), f"{p['percentual_recebido']}%"]
+                           for p in detalhe["pedidos"]],
+                          [largura * f for f in (0.14, 0.3, 0.18, 0.14, 0.12, 0.12)]))
+    if detalhe["recebimentos"]:
+        el.append(Paragraph("Recebimentos", E["h2"]))
+        el.append(_tabela(["Código", "Data", "Nota fiscal", "Conferente", "Situação", "Observações"],
+                          [[r["codigo"], data_hora(r["recebido_em"], tz), r["nota_fiscal"], r["recebido_por_nome"],
+                            SITUACAO_RECEBIMENTO.get(r["situacao"]), r["observacoes"] or ""] for r in detalhe["recebimentos"]],
+                          [largura * f for f in (0.12, 0.14, 0.12, 0.18, 0.14, 0.3)]))
+
     el.append(Paragraph("Documentos anexados", E["h2"]))
-    if anexos:
-        el.append(_tabela(
-            ["Arquivo", "Origem", "Rodada", "Enviado por", "SHA-256", "Situação"],
-            [[a["nome_original"], a["origem"], a["rodada_cotacao"], a["enviado_por_nome"], a["sha256"],
-              "Removido" if a["removido_em"] else "Ativo"] for a in anexos],
-            [largura * f for f in (0.2, 0.1, 0.08, 0.15, 0.36, 0.11)], fonte_mono={4},
-        ))
+    if detalhe["anexos"]:
+        el.append(_tabela(["Arquivo", "Tipo", "Enviado por", "SHA-256", "Situação"],
+                          [[a["nome_original"], a["tipo_documento"], a["enviado_por_nome"], a["sha256"],
+                            "Removido" if a["removido_em"] else "Ativo"] for a in detalhe["anexos"]],
+                          [largura * f for f in (0.24, 0.12, 0.16, 0.36, 0.12)], fonte_mono={3}))
     else:
         el.append(Paragraph("Nenhum documento anexado.", E["normal"]))
 
-    el.append(Paragraph("Cotações", E["h2"]))
-    if detalhe["cotacoes"]:
-        el.append(_tabela(
-            ["Fornecedor", "CNPJ", "Valor", "Prazo", "Pagamento", "Vencedora"],
-            [[c["razao_social"], _cnpj_fmt(c["cnpj"]), moeda(c["valor"]), f"{c['prazo_entrega_dias']} dias",
-              c["condicoes_pagamento"] or "—", "Sim" if c["selecionada"] else ""] for c in detalhe["cotacoes"]],
-            [largura * f for f in (0.28, 0.2, 0.14, 0.1, 0.18, 0.1)],
-        ))
-    else:
-        el.append(Paragraph("Nenhuma cotação registrada.", E["normal"]))
-
     el.append(Paragraph("Assinaturas eletrônicas", E["h2"]))
     if detalhe["assinaturas"]:
-        el.append(_tabela(
-            ["Responsável", "Ação", "Data/hora", "IP", "Hash de autenticidade (HMAC-SHA-256)"],
-            [[f"{a['usuario_nome']} ({a['usuario_papel']})", ACAO_ASSINATURA.get(a["acao"], a["acao"]),
-              data_hora(a["assinado_em"], tz), a["ip"], a["hash_autenticidade"]] for a in detalhe["assinaturas"]],
-            [largura * f for f in (0.2, 0.16, 0.13, 0.1, 0.41)], fonte_mono={4},
-        ))
-    else:
-        el.append(Paragraph("Nenhuma assinatura registrada.", E["normal"]))
-
+        el.append(_tabela(["Responsável", "Ação", "Data/hora", "IP", "Hash de autenticidade (HMAC-SHA-256)"],
+                          [[f"{a['usuario_nome']} ({PAPEL.get(a['papel'], a['papel'])})",
+                            ACAO_ASSINATURA.get(a["acao"], a["acao"]), data_hora(a["assinado_em"], tz), a["ip"],
+                            a["hash_autenticidade"]] for a in detalhe["assinaturas"]],
+                          [largura * f for f in (0.2, 0.17, 0.13, 0.09, 0.41)], fonte_mono={4}))
     el.append(Paragraph("Histórico de movimentações", E["h2"]))
-    el.append(_tabela(
-        ["Data/hora", "Responsável", "Movimentação", "Observação"],
-        [[data_hora(h["criado_em"], tz), h["autor_nome"] or "Sistema",
-          _mov(h), h["observacao"] or ""] for h in detalhe["historico"]],
-        [largura * f for f in (0.15, 0.2, 0.25, 0.4)],
-    ))
+    el.append(_tabela(["Data/hora", "Responsável", "Movimentação", "Observação"],
+                      [[data_hora(h["criado_em"], tz), h["autor_nome"] or "Sistema", _mov(h), h["observacao"] or ""]
+                       for h in detalhe["historico"]],
+                      [largura * f for f in (0.15, 0.2, 0.27, 0.38)]))
     el += [Spacer(1, 8), Paragraph(
-        "As assinaturas eletrônicas registram usuário, data/hora (UTC), IP de origem e o hash do conteúdo "
-        "da solicitação no momento da assinatura. A autenticidade pode ser verificada na plataforma.", E["pequeno"])]
+        "As assinaturas eletrônicas registram usuário, perfil, data/hora (UTC), IP de origem e o hash do conteúdo no "
+        "momento da assinatura. A autenticidade pode ser verificada no sistema.", E["pequeno"])]
     return _montar(el, titulo=f"Dossiê {s['codigo']}", autor=autor, instituicao=instituicao, codigo=codigo, tz=tz), codigo
 
 
-def _mov(h: dict) -> str:
-    if h["acao"] == "mudanca_status":
-        return (f"{STATUS_SOLICITACAO.get(h['status_de'], h['status_de'])} → "
-                f"{STATUS_SOLICITACAO.get(h['status_para'], h['status_para'])}")
-    return {"criacao": "Abertura da solicitação", "alteracao_urgencia": "Alteração de urgência",
-            "edicao": "Revisão do conteúdo"}.get(h["acao"], h["acao"])
+def documento_pedido(dados: dict, *, autor: str, instituicao: str, tz: str) -> tuple[bytes, str]:
+    """Pedido de compra oficial para envio ao fornecedor."""
+    p, f = dados["pedido"], dados["fornecedor"]
+    codigo = codigo_verificacao({"tipo": "pedido", "pedido": p, "itens": dados["itens"]})
+    largura = A4[0] - 32 * mm
+    el = [
+        Paragraph(f"Pedido de compra {esc(p['codigo'])}", E["titulo"]),
+        Paragraph(f"Referente à solicitação {esc(p['solicitacao_codigo'])} · {esc(p['solicitacao_titulo'])}", E["subtitulo"]),
+        _pares([
+            ("Fornecedor", f"<b>{esc(f['razao_social'])}</b>"),
+            ("CNPJ", esc(_cnpj_fmt(f["cnpj"]))),
+            ("Contato", esc(" · ".join(x for x in (f.get("contato"), f.get("email"), f.get("telefone")) if x) or "—")),
+            ("Cidade", esc(f"{f.get('cidade') or '—'}/{f.get('uf') or '—'}")),
+            ("Data de emissão", data_hora(p["criado_em"], tz)),
+            ("Status", esc(STATUS_PEDIDO.get(p["status"], p["status"]))),
+            ("Condições de pagamento", esc(p["condicoes_pagamento"])),
+            ("Prazo de entrega", f"{p['prazo_entrega_dias']} dias" + (
+                f" · previsão {data_hora(p['data_prevista_entrega'])}" if p.get("data_prevista_entrega") else "")),
+            ("Local de entrega", esc(p["local_entrega"] or "Almoxarifado central — Hospital Rio Grande")),
+            ("Setor requisitante", esc(p["setor_nome"])),
+            ("Comprador responsável", esc(p["comprador_nome"])),
+        ], largura, 2),
+        Paragraph("Itens", E["h2"]),
+        _tabela(["#", "Descrição", "Marca", "Un.", "Qtd.", "Unitário", "Total"],
+                [[i + 1, it["descricao"], it["marca"] or "—", it["unidade"], _qtd(it["quantidade"]),
+                  moeda(it["valor_unitario"]), moeda(it["total"])] for i, it in enumerate(dados["itens"])],
+                [largura * x for x in (0.05, 0.38, 0.13, 0.07, 0.09, 0.14, 0.14)]),
+        Spacer(1, 6),
+        _pares([("Subtotal dos itens", moeda(p["valor_itens"])), ("Frete", moeda(p["frete"])),
+                ("Desconto", moeda(p["desconto"])), ("Valor total do pedido", f"<b>{moeda(p['valor_total'])}</b>")],
+               largura, 4),
+    ]
+    if p.get("observacoes"):
+        el += [Paragraph("Observações", E["h2"]), Paragraph(esc(p["observacoes"]), E["normal"])]
+    if dados["aprovacoes"]:
+        el.append(Paragraph("Aprovações", E["h2"]))
+        el.append(_tabela(["Data/hora", "Nível", "Decisão", "Responsável"],
+                          [[data_hora(a["criado_em"], tz), NIVEL_APROVACAO.get(a["nivel"]), DECISAO_APROVACAO.get(a["decisao"]),
+                            a["usuario_nome"]] for a in dados["aprovacoes"]],
+                          [largura * x for x in (0.2, 0.25, 0.2, 0.35)]))
+    el += [Spacer(1, 10), Paragraph(
+        "Faturar em nome do Hospital Rio Grande. Informe o número deste pedido na nota fiscal. A entrega será conferida "
+        "pelo setor de Recebimento; itens em desacordo com o pedido serão recusados.", E["pequeno"])]
+    return _montar(el, titulo=f"Pedido de compra {p['codigo']}", autor=autor, instituicao=instituicao, codigo=codigo,
+                   tz=tz), codigo
 
 
-def _cnpj_fmt(c: str | None) -> str:
-    if not c or len(c) != 14:
-        return c or "—"
-    return f"{c[:2]}.{c[2:5]}.{c[5:8]}/{c[8:12]}-{c[12:]}"
+def _num(v, casas=1) -> str:
+    return "—" if v is None else f"{v:.{casas}f}".replace(".", ",")
 
 
 def relatorio_executivo(painel: dict, filtros_texto: str, *, autor: str, instituicao: str, tz: str) -> tuple[bytes, str]:
@@ -415,63 +499,50 @@ def relatorio_executivo(painel: dict, filtros_texto: str, *, autor: str, institu
     largura = A4[0] - 32 * mm
     k = painel["kpis"]
     el = [
-        Paragraph("Relatório executivo de solicitações e serviços", E["titulo"]),
+        Paragraph("Relatório executivo de Compras", E["titulo"]),
         Paragraph(esc(filtros_texto), E["subtitulo"]),
-        _kpis([
-            ("Solicitações no período", str(k["total"])),
-            ("Em andamento", str(k["em_andamento"])),
-            ("Homologadas", str(k["aprovadas"])),
-            ("Rejeitadas/canceladas", str(k["rejeitadas"])),
-        ], largura),
+        _kpis([("Valor contratado", moeda(k["valor_contratado"])), ("Pedidos emitidos", str(k["pedidos"])),
+               ("Economia sobre o estimado", moeda(k["economia"])), ("Ticket médio", moeda(k["ticket_medio"]))], largura),
         Spacer(1, 6),
-        _kpis([
-            ("Valor homologado", moeda(k["valor_aprovado"])),
-            ("Economia sobre estimado", moeda(k["economia"])),
-            ("Cumprimento de SLA", f"{k['sla_cumprimento']:.0%}" if k["sla_cumprimento"] is not None else "—"),
-            ("Ciclo médio (dias)", f"{k['ciclo_medio_dias']:.1f}".replace(".", ",") if k["ciclo_medio_dias"] is not None else "—"),
-        ], largura),
+        _kpis([("Solicitações no período", str(k["solicitacoes"])), ("Em aberto hoje", str(k["abertas"])),
+               ("Prazo de atendimento cumprido", f"{k['sla_cumprimento']:.0%}" if k["sla_cumprimento"] is not None else "—"),
+               ("Entregas no prazo", f"{k['pontualidade_entregas']:.0f}%" if k["pontualidade_entregas"] is not None else "—")],
+              largura),
         Spacer(1, 6),
-        _kpis([
-            ("SLA dentro do prazo", str(k["sla_dentro"])),
-            ("SLA em alerta (< 24h)", str(k["sla_alerta"])),
-            ("SLA estourado", str(k["sla_estourado"])),
-            ("Serviços atrasados", str(painel["servicos"]["atrasados"])),
-        ], largura),
+        _kpis([("Tempo médio de aprovação (dias)", _num(k["tempo_aprovacao_dias"])),
+               ("Tempo médio de cotação (dias)", _num(k["tempo_cotacao_dias"])),
+               ("Abertura até pedido (dias)", _num(k["tempo_ate_pedido_dias"])),
+               ("Lead time total (dias)", _num(k["lead_time_dias"]))], largura),
         Spacer(1, 10),
     ]
-    status = painel["por_status"]
-    el.append(KeepTogether([_grafico_rosca("Distribuição por status",
-                                           [STATUS_SOLICITACAO.get(s["status"], s["status"]) for s in status],
-                                           [s["quantidade"] for s in status], largura)]))
+    funil = painel["funil"]
+    el.append(KeepTogether([_grafico_barras_h("Solicitações em andamento por etapa", [f["rotulo"] for f in funil],
+                                              [f["quantidade"] for f in funil], largura)]))
     setores = painel["por_setor"]
-    el.append(KeepTogether([_grafico_barras_h("Solicitações por setor", [s["setor_nome"] for s in setores],
-                                              [s["quantidade"] for s in setores], largura)]))
-    el.append(KeepTogether([_grafico_barras_h("Valor homologado por setor (R$)", [s["setor_nome"] for s in setores],
-                                              [float(s["valor_aprovado"] or 0) for s in setores], largura,
+    el.append(KeepTogether([_grafico_barras_h("Valor contratado por setor (R$)", [s["setor_nome"] for s in setores[:10]],
+                                              [float(s["valor"] or 0) for s in setores[:10]], largura,
                                               formato=lambda v: moeda(v), monetario=True)]))
-    meses = painel["por_mes"]
-    el.append(KeepTogether([_grafico_colunas("Evolução mensal", [m["mes"] for m in meses],
-                                             [[m["abertas"] for m in meses], [m["homologadas"] for m in meses]],
-                                             ["Abertas", "Homologadas"], largura)]))
-    el.append(Paragraph("Detalhamento por setor", E["h2"]))
-    el.append(_tabela(
-        ["Setor", "Solicitações", "Em andamento", "Homologadas", "Valor homologado", "SLA estourado"],
-        [[s["setor_nome"], s["quantidade"], s["em_andamento"], s["aprovadas"], moeda(s["valor_aprovado"]),
-          s["sla_estourado"]] for s in setores],
-        [largura * f for f in (0.28, 0.13, 0.14, 0.13, 0.19, 0.13)],
-    ))
+    categorias = painel["por_categoria"]
+    el.append(KeepTogether([_grafico_barras_h("Valor contratado por categoria (R$)", [c["categoria"] for c in categorias[:10]],
+                                              [float(c["valor"] or 0) for c in categorias[:10]], largura,
+                                              formato=lambda v: moeda(v), monetario=True)]))
+    meses = painel["por_mes"][-12:]
+    el.append(KeepTogether([_grafico_colunas("Evolução mensal", [m["mes"][:2] + "/" + m["mes"][-2:] for m in meses],
+                                             [[m["solicitacoes"] for m in meses], [m["pedidos"] for m in meses]],
+                                             ["Solicitações", "Pedidos"], largura)]))
     if painel["top_fornecedores"]:
-        el.append(Paragraph("Principais fornecedores homologados", E["h2"]))
-        el.append(_tabela(
-            ["Fornecedor", "CNPJ", "Contratos", "Valor homologado"],
-            [[f["razao_social"], _cnpj_fmt(f["cnpj"]), f["contratos"], moeda(f["valor"])] for f in painel["top_fornecedores"]],
-            [largura * f for f in (0.45, 0.22, 0.13, 0.2)],
-        ))
-    sv = painel["servicos"]
-    el.append(Paragraph("Serviços programados no período", E["h2"]))
-    el.append(_kpis([("Agendados", str(sv["agendados"])), ("Em andamento", str(sv["em_andamento"])),
-                     ("Concluídos", str(sv["concluidos"])), ("Atrasados", str(sv["atrasados"]))], largura))
-    return _montar(el, titulo="Relatório executivo", autor=autor, instituicao=instituicao, codigo=codigo, tz=tz), codigo
+        el.append(Paragraph("Principais fornecedores", E["h2"]))
+        el.append(_tabela(["Fornecedor", "CNPJ", "Pedidos", "Valor contratado"],
+                          [[f["fornecedor"], _cnpj_fmt(f["cnpj"]), f["pedidos"], moeda(f["valor"])]
+                           for f in painel["top_fornecedores"]],
+                          [largura * x for x in (0.45, 0.22, 0.13, 0.2)]))
+    if setores:
+        el.append(Paragraph("Detalhamento por setor", E["h2"]))
+        el.append(_tabela(["Setor", "Pedidos", "Valor contratado"],
+                          [[s["setor_nome"], s["pedidos"], moeda(s["valor"])] for s in setores],
+                          [largura * x for x in (0.6, 0.15, 0.25)]))
+    return _montar(el, titulo="Relatório executivo de Compras", autor=autor, instituicao=instituicao, codigo=codigo,
+                   tz=tz), codigo
 
 
 def relatorio_solicitacoes(linhas: list[dict], filtros_texto: str, *, autor: str, instituicao: str,
@@ -479,43 +550,18 @@ def relatorio_solicitacoes(linhas: list[dict], filtros_texto: str, *, autor: str
     codigo = codigo_verificacao({"tipo": "solicitacoes", "linhas": linhas, "filtros": filtros_texto})
     largura = landscape(A4)[0] - 32 * mm
     total_estimado = sum(Decimal(str(l["valor_estimado"] or 0)) for l in linhas)
-    total_aprovado = sum(Decimal(str(l["valor_final_aprovado"] or 0)) for l in linhas)
+    total_contratado = sum(Decimal(str(l["valor_final"] or 0)) for l in linhas)
     el = [
-        Paragraph("Relatório de solicitações", E["titulo"]),
+        Paragraph("Relatório de solicitações de compra", E["titulo"]),
         Paragraph(esc(filtros_texto) + f" · {len(linhas)} registro(s)", E["subtitulo"]),
-        _tabela(
-            ["Código", "Título", "Setor", "Urgência", "Status", "SLA", "Abertura", "Estimado", "Homologado"],
-            [[l["codigo"], l["titulo"], l["setor_nome"], URGENCIA.get(l["urgencia"], l["urgencia"]),
-              STATUS_SOLICITACAO.get(l["status"], l["status"]), SLA_SITUACAO.get(l["sla_situacao"], l["sla_situacao"]),
-              data_hora(l["criado_em"], tz), moeda(l["valor_estimado"]), moeda(l["valor_final_aprovado"])]
-             for l in linhas],
-            [largura * f for f in (0.1, 0.22, 0.12, 0.07, 0.12, 0.1, 0.09, 0.09, 0.09)],
-        ),
+        _tabela(["Código", "Título", "Setor", "Urgência", "Status", "Prazo", "Abertura", "Estimado", "Contratado"],
+                [[l["codigo"], l["titulo"], l["setor_nome"], URGENCIA.get(l["urgencia"], l["urgencia"]),
+                  STATUS_SOLICITACAO.get(l["status"], l["status"]), SLA_SITUACAO.get(l["sla_situacao"], l["sla_situacao"]),
+                  data_hora(l["criado_em"], tz), moeda(l["valor_estimado"]), moeda(l["valor_final"])] for l in linhas],
+                [largura * x for x in (0.09, 0.24, 0.13, 0.07, 0.12, 0.1, 0.09, 0.08, 0.08)]),
         Spacer(1, 6),
-        Paragraph(f"<b>Total estimado:</b> {moeda(total_estimado)} &nbsp;&nbsp; <b>Total homologado:</b> {moeda(total_aprovado)}",
-                  E["normal"]),
+        Paragraph(f"<b>Total estimado:</b> {moeda(total_estimado)} &nbsp;&nbsp; <b>Total contratado:</b> "
+                  f"{moeda(total_contratado)}", E["normal"]),
     ]
     return _montar(el, titulo="Relatório de solicitações", autor=autor, instituicao=instituicao, codigo=codigo,
-                   tz=tz, paisagem=True), codigo
-
-
-def relatorio_servicos(linhas: list[dict], filtros_texto: str, *, autor: str, instituicao: str,
-                       tz: str) -> tuple[bytes, str]:
-    codigo = codigo_verificacao({"tipo": "servicos", "linhas": linhas, "filtros": filtros_texto})
-    largura = landscape(A4)[0] - 32 * mm
-    el = [
-        Paragraph("Agenda de serviços programados", E["titulo"]),
-        Paragraph(esc(filtros_texto) + f" · {len(linhas)} registro(s)", E["subtitulo"]),
-        _tabela(
-            ["Código", "Data", "Horário", "Serviço", "Categoria", "Setor", "Executor / Empresa", "Periodicidade", "Situação"],
-            [[l["codigo"], data_hora(l["data_programada"]), f"{l['hora_inicio']:%H:%M}–{l['hora_termino']:%H:%M}",
-              l["titulo"], CATEGORIA_SERVICO.get(l["categoria"], l["categoria"]), l["setor_nome"],
-              l["responsavel_executor"] + (f" / {l['empresa_terceirizada']}" if l["empresa_terceirizada"] else ""),
-              PERIODICIDADE.get(l["periodicidade"], l["periodicidade"]),
-              SITUACAO_SERVICO.get(l["situacao"], l["situacao"]) + (" (atrasado)" if l["atrasado"] else "")]
-             for l in linhas],
-            [largura * f for f in (0.09, 0.07, 0.08, 0.2, 0.11, 0.11, 0.16, 0.08, 0.1)],
-        ),
-    ]
-    return _montar(el, titulo="Serviços programados", autor=autor, instituicao=instituicao, codigo=codigo,
                    tz=tz, paisagem=True), codigo

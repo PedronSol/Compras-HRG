@@ -156,16 +156,16 @@ class LoteArquivos:
 
 
 def inserir_anexo(cur, lote: LoteArquivos, arquivo: ArquivoValidado, *, usuario_id: str, origem: str,
-                  tipo_documento: str, solicitacao_id: str | None = None, servico_id: str | None = None,
-                  rodada: int = 1) -> str:
+                  tipo_documento: str, solicitacao_id: str, recebimento_id: str | None = None) -> str:
+    """Grava o arquivo cifrado e registra seus metadados. O conteúdo nunca é lido nem interpretado."""
     caminho = lote.salvar(arquivo)
     cur.execute(
         """
-        insert into rg.anexos (solicitacao_id, servico_id, origem, tipo_documento, nome_original, mime,
-                               tamanho, sha256, caminho, rodada_cotacao, enviado_por)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) returning id
+        insert into rg.anexos (solicitacao_id, recebimento_id, origem, tipo_documento, nome_original, mime,
+                               tamanho, sha256, caminho, enviado_por)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) returning id
         """,
-        (solicitacao_id, servico_id, origem, tipo_documento, arquivo.nome, arquivo.mime,
-         arquivo.tamanho, arquivo.sha256, caminho, rodada, usuario_id),
+        (solicitacao_id, recebimento_id, origem, tipo_documento, arquivo.nome, arquivo.mime,
+         arquivo.tamanho, arquivo.sha256, caminho, usuario_id),
     )
     return str(cur.fetchone()["id"])

@@ -151,3 +151,18 @@ def _converter(c: Campo, valor: Any) -> Any:
 
 def somente_digitos(valor: str | None) -> str:
     return re.sub(r"\D", "", valor or "")
+
+
+def cnpj_valido(cnpj: str) -> bool:
+    """Dígitos verificadores de CNPJ numérico ou alfanumérico (IN RFB nº 2.229/2024)."""
+    d = re.sub(r"[^0-9A-Z]", "", (cnpj or "").upper())
+    if not re.fullmatch(r"[0-9A-Z]{12}\d{2}", d) or len(set(d)) == 1:
+        return False
+
+    def dv(base: str, pesos: list[int]) -> int:
+        soma = sum((ord(c) - 48) * p for c, p in zip(base, pesos))
+        r = soma % 11
+        return 0 if r < 2 else 11 - r
+
+    p1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+    return dv(d[:12], p1) == int(d[12]) and dv(d[:13], [6] + p1) == int(d[13])

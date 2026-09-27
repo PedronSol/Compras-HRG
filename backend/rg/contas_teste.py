@@ -1,20 +1,31 @@
-"""Contas de demonstração para desenvolvimento (nunca expostas em produção)."""
+"""Contas de demonstração (dados fictícios). Nunca disponíveis com RG_AMBIENTE=producao."""
 from __future__ import annotations
 
 SENHA_TESTE = "Teste@Hospital2026"
 
+# Um usuário por perfil, exibidos no seletor de perfis da tela inicial do ambiente de demonstração.
 CONTAS_TESTE = [
-    {"papel": "admin", "nome": "Ana Administração (teste)", "email": "admin.teste@rghospital.com.br",
-     "setor_codigo": "administracao", "cargo": "Administrador"},
-    {"papel": "gestor", "nome": "Gustavo Gestor (teste)", "email": "gestor.teste@rghospital.com.br",
-     "setor_codigo": "pronto_socorro", "cargo": "Gestor de setor"},
-    {"papel": "compras", "nome": "Carla Compras (teste)", "email": "compras.teste@rghospital.com.br",
-     "setor_codigo": "suprimentos", "cargo": "Comprador"},
+    {"papel": "admin", "nome": "Renata Moura", "email": "admin@hrg.demo",
+     "setor_codigo": "administracao", "cargo": "Administradora de Sistemas"},
+    {"papel": "comprador", "nome": "Carlos Menezes", "email": "comprador@hrg.demo",
+     "setor_codigo": "suprimentos", "cargo": "Comprador Sênior"},
+    {"papel": "solicitante", "nome": "Juliana Prado", "email": "solicitante@hrg.demo",
+     "setor_codigo": "uti_adulto", "cargo": "Enfermeira Supervisora"},
+    {"papel": "gestor", "nome": "Fernando Alves", "email": "gestor@hrg.demo",
+     "setor_codigo": "uti_adulto", "cargo": "Coordenador Médico da UTI"},
+    {"papel": "financeiro", "nome": "Patrícia Lemos", "email": "financeiro@hrg.demo",
+     "setor_codigo": "financeiro", "cargo": "Analista Financeira"},
+    {"papel": "recebimento", "nome": "Marcos Vieira", "email": "recebimento@hrg.demo",
+     "setor_codigo": "suprimentos", "cargo": "Conferente de Almoxarifado"},
+    {"papel": "diretoria", "nome": "Helena Castro", "email": "diretoria@hrg.demo",
+     "setor_codigo": "diretoria", "cargo": "Diretora Administrativa"},
+    {"papel": "auditoria", "nome": "Roberto Nunes", "email": "auditoria@hrg.demo",
+     "setor_codigo": "controladoria", "cargo": "Auditor Interno"},
 ]
 
 
 def semear(cur, hash_senha: str, termo_versao: str) -> list[str]:
-    """Cria as contas de teste que ainda não existem. Retorna os e-mails criados."""
+    """Cria as contas de demonstração que ainda não existem. Retorna os e-mails criados."""
     criadas = []
     for c in CONTAS_TESTE:
         cur.execute("select 1 from rg.usuarios where lower(email) = %s", (c["email"],))

@@ -1,4 +1,4 @@
-"""Trilha de auditoria (somente Administração)."""
+"""Trilha de auditoria (Administrador e Auditoria)."""
 from __future__ import annotations
 
 import re
@@ -14,7 +14,7 @@ bp = Blueprint("auditoria", __name__)
 
 
 @bp.get("/auditoria")
-@requer_papel("admin")
+@requer_papel("admin", "auditoria")
 def listar():
     args = validar(request.args.to_dict(), [
         Campo("tabela", "texto", max_len=60),
@@ -64,7 +64,7 @@ def listar():
 
 
 @bp.get("/auditoria/relatorios/<codigo>")
-@requer_papel("admin")
+@requer_papel("admin", "auditoria")
 def verificar_relatorio(codigo: str):
     """Confere se um código de verificação impresso em um PDF foi emitido pela plataforma."""
     if not re.fullmatch(r"[0-9a-f]{64}", codigo):

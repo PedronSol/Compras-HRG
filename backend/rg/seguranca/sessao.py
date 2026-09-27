@@ -89,6 +89,8 @@ def buscar_sessao(token: str | None, *, tocar: bool = True) -> tuple[dict, dict]
         "setor_codigo": linha["setor_codigo"], "setor_nome": linha["setor_nome"], "setor_cor": linha["setor_cor"],
         "cargo": linha["cargo"], "troca_senha_obrigatoria": linha["troca_senha_obrigatoria"],
     }
+    from ..permissoes import capacidades_do_papel
+    usuario["capacidades"] = capacidades_do_papel(usuario["papel"])
     sessao = {"id": str(linha["sessao_id"]), "csrf_token": linha["csrf_token"]}
     return usuario, sessao
 

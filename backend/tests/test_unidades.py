@@ -1,10 +1,11 @@
-"""Testes unitários: senhas, OCR (análise), CNPJ, periodicidade e marca."""
-from datetime import date
+"""Testes unitários: senhas, CNPJ, tipos de arquivo, comparação de propostas e matriz de permissões."""
+from decimal import Decimal
 
-from rg.api.servicos import proxima_data
+from rg import permissoes
 from rg.seguranca import senhas
 from rg.servicos.arquivos import detectar_mime, sanitizar_nome
-from rg.servicos.ocr.analise import analisar, chave_nfe_valida, cnpj_valido
+from rg.servicos.workflow import comparar_propostas
+from rg.validacao import cnpj_valido
 
 
 def test_politica_de_senha():
@@ -28,84 +29,38 @@ def test_cnpj_numerico_e_alfanumerico():
     assert cnpj_valido("11.222.333/0001-81")
     assert not cnpj_valido("11.222.333/0001-82")
     assert not cnpj_valido("00000000000000")
-    # CNPJ alfanumérico (IN RFB 2.229/2024) — exemplo oficial da Receita Federal
-    assert cnpj_valido("12.ABC.345/01DE-35")
-
-
-def test_analise_orcamento():
-    texto = """ORÇAMENTO Nº 2026-145
-MEDTEC EQUIPAMENTOS HOSPITALARES LTDA
-CNPJ: 11.222.333/0001-81
-Data de emissão: 12/09/2026
-Subtotal: R$ 12.000,00
-Valor total: R$ 12.450,90
-Prazo de entrega: 15 dias úteis
-Validade da proposta: 30 dias
-Condições de pagamento: 30/60 dias
-contato@medtec.com.br (51) 3333-4444"""
-    r = analisar(texto)
-    assert r["tipo_documento"]["valor"] == "orcamento"
-    assert r["cnpj_emitente"]["valor"] == "11.222.333/0001-81"
-    assert r["valor_total"]["valor"] == "12450.90"
-    assert r["numero_documento"]["valor"] == "2026-145"
-    assert r["data_emissao"]["valor"] == "2026-09-12"
-    assert r["prazo_entrega_dias"]["valor"] == 15
-    assert r["validade_dias"]["valor"] == 30
-    assert r["condicoes_pagamento"]["valor"] == "30/60 dias"
-    assert "MEDTEC" in r["razao_social"]["valor"]
-    assert r["emails"] == ["contato@medtec.com.br"]
-
-
-def _chave_valida(base43: str) -> str:
-    pesos = [2, 3, 4, 5, 6, 7, 8, 9]
-    soma = sum(int(c) * pesos[i % 8] for i, c in enumerate(reversed(base43)))
-    r = soma % 11
-    return base43 + str(0 if r < 2 else 11 - r)
-
-
-def test_analise_nota_fiscal_com_chave():
-    base = "43" + "2609" + "11222333000181" + "55" + "001" + "000004567" + "1" + "12345678"
-    chave = _chave_valida(base)
-    assert chave_nfe_valida(chave)
-    agrupada = " ".join(chave[i:i + 4] for i in range(0, 44, 4))
-    texto = f"""DANFE - Documento Auxiliar da Nota Fiscal Eletrônica
-CHAVE DE ACESSO
-{agrupada}
-VALOR TOTAL DA NOTA 8.990,00
-DATA DE EMISSÃO 03/09/2026"""
-    r = analisar(texto)
-    assert r["tipo_documento"]["valor"] == "nota_fiscal"
-    assert r["chave_acesso"]["valor"] == chave
-    assert r["numero_documento"]["valor"] == "4567"
-    assert r["cnpj_emitente"]["valor"] == "11.222.333/0001-81"
-    assert r["valor_total"]["valor"] == "8990.00"
-
-
-def test_analise_laudo_calibracao():
-    texto = """CERTIFICADO DE CALIBRAÇÃO Nº CAL-8812
-Equipamento: Bomba de infusão BI-300
-Número de série: SN-45-2231
-Data da calibração: 01/09/2026
-Próxima calibração: 01/09/2027
-Resultado: APROVADO - dentro da tolerância"""
-    r = analisar(texto)
-    assert r["tipo_documento"]["valor"] == "laudo"
-    assert r["equipamento"]["valor"] == "Bomba de infusão BI-300"
-    assert r["data_calibracao"]["valor"] == "2026-09-01"
-    assert r["proxima_calibracao"]["valor"] == "2027-09-01"
-    assert r["resultado_laudo"]["valor"] == "conforme"
-
-
-def test_proxima_data_periodicidade():
-    assert proxima_data(date(2026, 1, 31), "mensal") == date(2026, 2, 28)
-    assert proxima_data(date(2026, 9, 19), "semanal") == date(2026, 9, 26)
-    assert proxima_data(date(2026, 8, 31), "semestral") == date(2027, 2, 28)
-    assert proxima_data(date(2026, 9, 19), "unica") is None
+    assert cnpj_valido("12.ABC.345/01DE-35")  # exemplo oficial da Receita Federal (IN RFB 2.229/2024)
 
 
 def test_deteccao_de_tipo_por_bytes():
     assert detectar_mime(b"%PDF-1.7 ...") == "application/pdf"
     assert detectar_mime(b"\x89PNG\r\n\x1a\n....") == "image/png"
+    assert detectar_mime(b"\xff\xd8\xff\xe0 foto") == "image/jpeg"
     assert detectar_mime(b"MZ\x90\x00 executavel") is None
     assert sanitizar_nome("../../etc/passwd", "application/pdf") == "passwd.pdf"
     assert sanitizar_nome("foto.JPEG", "image/jpeg") == "foto.jpeg"
+
+
+def test_comparacao_de_propostas():
+    itens = [{"id": "a", "descricao": "Luva", "unidade": "CX", "quantidade": Decimal("10"), "valor_unitario_estimado": 40},
+             {"id": "b", "descricao": "Gaze", "unidade": "PCT", "quantidade": Decimal("5"), "valor_unitario_estimado": 2}]
+    cot = [
+        {"id": "x", "valor_total": Decimal("420"), "prazo_entrega_dias": 5,
+         "itens": [{"solicitacao_item_id": "a", "valor_unitario": Decimal("41"), "quantidade": Decimal("10"), "marca": None},
+                   {"solicitacao_item_id": "b", "valor_unitario": Decimal("2"), "quantidade": Decimal("5"), "marca": None}]},
+        {"id": "y", "valor_total": Decimal("380"), "prazo_entrega_dias": 9,
+         "itens": [{"solicitacao_item_id": "a", "valor_unitario": Decimal("38"), "quantidade": Decimal("10"), "marca": None}]},
+    ]
+    c = comparar_propostas(itens, cot, 3)
+    assert c["ranking"] == ["x", "y"]  # proposta incompleta vai para o fim, mesmo mais barata
+    assert c["menor_total"] == Decimal("420") and c["melhor_prazo"] == 5
+    assert c["linhas"][0]["menor_unitario"] == Decimal("38") and c["abaixo_do_minimo"] is True
+
+
+def test_matriz_de_permissoes_segrega_funcoes():
+    assert permissoes.pode({"papel": "gestor"}, "solicitacao.aprovar_gestor")
+    assert not permissoes.pode({"papel": "admin"}, "solicitacao.aprovar_gestor")  # administrador não aprova compras
+    assert not permissoes.pode({"papel": "comprador"}, "pedido.aprovar_financeiro")
+    assert not permissoes.pode({"papel": "auditoria"}, "solicitacao.criar")
+    escrita = [c for c in permissoes.CAPACIDADES if not c.endswith(".ver")]
+    assert not any(permissoes.pode({"papel": "auditoria"}, c) for c in escrita)

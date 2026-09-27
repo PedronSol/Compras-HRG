@@ -1,7 +1,9 @@
-"""Infraestrutura de testes: PostgreSQL 17 real (pgembed), migrações e usuários de cada papel."""
+"""Infraestrutura de testes: PostgreSQL real (pgembed ou RG_TEST_PG_URL), migrações e usuários dos 8 perfis."""
 from __future__ import annotations
 
 import io
+import json
+import os
 import shutil
 import tempfile
 import uuid
@@ -29,8 +31,22 @@ def _instalar_fusos(destino: Path) -> None:
     shutil.copytree(origem, destino, ignore=shutil.ignore_patterns("__init__.py", "__pycache__"))
 
 
+class _ServidorExterno:
+    """PostgreSQL já em execução (RG_TEST_PG_URL), útil onde o pgembed não está disponível."""
+
+    def __init__(self, url: str):
+        self.url = url
+
+    def get_uri(self) -> str:
+        return self.url
+
+
 @pytest.fixture(scope="session")
 def servidor_pg():
+    externo = os.environ.get("RG_TEST_PG_URL")
+    if externo:
+        yield _ServidorExterno(externo)
+        return
     pgembed = pytest.importorskip("pgembed")
     _instalar_fusos(Path(pgembed.__file__).parent / "pginstall" / "share" / "postgresql" / "timezone")
     diretorio = tempfile.mkdtemp(prefix="rg-pg-")
@@ -69,7 +85,6 @@ def app(url_banco, tmp_path_factory):
         SESSION_COOKIE_SECURE=False,
         HIBP_ENABLED=False,
         STORAGE_DIR=tmp_path_factory.mktemp("storage"),
-        OCR_SINCRONO=True,
         BACKGROUND_JOBS=False,
         SERVE_FRONTEND=True,
     )
@@ -133,9 +148,15 @@ class Cliente:
 def usuarios(url_banco):
     return {
         "admin": criar_usuario(url_banco, papel="admin", setor="administracao", nome="Ana Administradora"),
+        "solicitante": criar_usuario(url_banco, papel="solicitante", setor="uti_adulto", nome="Sofia Solicitante"),
         "gestor": criar_usuario(url_banco, papel="gestor", setor="uti_adulto", nome="Gustavo Gestor"),
+        "solicitante_lab": criar_usuario(url_banco, papel="solicitante", setor="laboratorio", nome="Lia Laboratório"),
         "gestor_lab": criar_usuario(url_banco, papel="gestor", setor="laboratorio", nome="Lara Laboratório"),
-        "compras": criar_usuario(url_banco, papel="compras", setor="suprimentos", nome="Carlos Compras"),
+        "comprador": criar_usuario(url_banco, papel="comprador", setor="suprimentos", nome="Carlos Comprador"),
+        "financeiro": criar_usuario(url_banco, papel="financeiro", setor="financeiro", nome="Fabiana Financeiro"),
+        "recebimento": criar_usuario(url_banco, papel="recebimento", setor="suprimentos", nome="Rui Recebimento"),
+        "diretoria": criar_usuario(url_banco, papel="diretoria", setor="diretoria", nome="Diana Diretoria"),
+        "auditoria": criar_usuario(url_banco, papel="auditoria", setor="controladoria", nome="Otto Auditor"),
     }
 
 
@@ -144,51 +165,97 @@ def clientes(app, usuarios):
     return {nome: Cliente(app, u) for nome, u in usuarios.items()}
 
 
-def pdf_orcamento(cnpj: str = "11.222.333/0001-81", total: str = "12.450,90") -> bytes:
+def pdf_orcamento() -> bytes:
+    """Documento de orçamento apenas anexado (o sistema nunca lê seu conteúdo)."""
     from reportlab.pdfgen import canvas
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer)
-    linhas = [
-        "ORÇAMENTO Nº 2026-145",
-        "MEDTEC EQUIPAMENTOS HOSPITALARES LTDA",
-        f"CNPJ: {cnpj}",
-        "Data de emissão: 12/09/2026",
-        "Item: Monitor multiparamétrico - 2 unidades",
-        "Subtotal: R$ 12.000,00",
-        f"Valor total: R$ {total}",
-        "Prazo de entrega: 15 dias úteis",
-        "Validade da proposta: 30 dias",
-        "Condições de pagamento: 30/60 dias",
-        "contato@medtec.com.br  (51) 3333-4444",
-    ]
-    y = 800
-    for linha in linhas:
-        c.drawString(60, y, linha)
-        y -= 22
+    c.drawString(60, 800, "ORÇAMENTO Nº 2026-145 — MEDTEC EQUIPAMENTOS HOSPITALARES LTDA")
+    c.drawString(60, 778, "Monitor multiparamétrico — 2 unidades — R$ 12.450,90")
     c.save()
     return buffer.getvalue()
 
 
-def dados_solicitacao(**extra) -> dict:
+ITENS_PADRAO = [
+    {"descricao": "Monitor multiparamétrico 12 polegadas", "unidade": "UN", "quantidade": "2",
+     "valor_unitario_estimado": "6.500,00"},
+    {"descricao": "Cabo de ECG 5 vias", "unidade": "UN", "quantidade": "4", "valor_unitario_estimado": "250"},
+]
+
+
+def dados_solicitacao(itens=None, **extra) -> dict:
     base = {
-        "tipo": "compra",
+        "tipo": "equipamento",
         "titulo": "Aquisição de monitores multiparamétricos",
         "descricao": "Substituição de dois monitores da UTI adulto com defeito recorrente.",
         "justificativa": "Equipamentos atuais apresentam falhas frequentes que colocam pacientes em risco.",
         "urgencia": "urgente",
-        "valor_estimado": "13.000,00",
+        "itens": json.dumps(itens if itens is not None else ITENS_PADRAO),
     }
     base.update(extra)
     return base
 
 
-def criar_solicitacao(cliente: Cliente, com_anexo: bool = True, **extra) -> dict:
-    dados = dados_solicitacao(**extra)
+def criar_solicitacao(cliente: Cliente, com_anexo: bool = True, itens=None, **extra) -> dict:
+    dados = dados_solicitacao(itens, **extra)
     if com_anexo:
         dados["arquivos"] = [(io.BytesIO(pdf_orcamento()), "orcamento-medtec.pdf")]
     r = cliente.post("/api/v1/solicitacoes", data=dados)
     assert r.status_code == 201, r.get_json()
     return r.get_json()
+
+
+def acao(cliente: Cliente, sid: str, nome: str, **dados):
+    return cliente.post(f"/api/v1/solicitacoes/{sid}/acoes/{nome}", json=dados)
+
+
+def acao_pedido(cliente: Cliente, pid: str, nome: str, **dados):
+    return cliente.post(f"/api/v1/pedidos/{pid}/acoes/{nome}", json=dados)
+
+
+def fornecedor(cliente: Cliente, cnpj: str, razao: str) -> str:
+    r = cliente.post("/api/v1/fornecedores", json={"razao_social": razao, "cnpj": cnpj})
+    if r.status_code == 422:
+        return cliente.get("/api/v1/fornecedores", query_string={"q": cnpj}).get_json()["itens"][0]["id"]
+    assert r.status_code == 201, r.get_json()
+    return r.get_json()["id"]
+
+
+def proposta(cliente: Cliente, sid: str, fornecedor_id: str, itens: list[dict], precos: list[str], **extra):
+    corpo = {"fornecedor_id": fornecedor_id, "prazo_entrega_dias": extra.pop("prazo", 10),
+             "condicoes_pagamento": "30 dias", "frete": extra.pop("frete", "0"),
+             "itens": [{"solicitacao_item_id": i["id"], "quantidade": str(i["quantidade"]), "valor_unitario": p}
+                       for i, p in zip(itens, precos)]}
+    corpo.update(extra)
+    return cliente.post(f"/api/v1/solicitacoes/{sid}/propostas", json=corpo)
+
+
+def ate_aprovada(clientes, **extra) -> dict:
+    d = criar_solicitacao(clientes["solicitante"], com_anexo=False, **extra)
+    sid = d["solicitacao"]["id"]
+    r = acao(clientes["gestor"], sid, "aprovar", versao=d["solicitacao"]["versao"])
+    assert r.status_code == 200, r.get_json()
+    return r.get_json()
+
+
+def ate_pedido(clientes, **extra) -> tuple[dict, str]:
+    """Leva uma solicitação até o pedido emitido. Retorna (detalhe, pedido_id)."""
+    d = ate_aprovada(clientes, **extra)
+    sid = d["solicitacao"]["id"]
+    comprador = clientes["comprador"]
+    d = acao(comprador, sid, "iniciar_cotacao", versao=d["solicitacao"]["versao"]).get_json()
+    itens = d["itens"]
+    f1 = fornecedor(comprador, "11.222.333/0001-81", "MEDTEC EQUIPAMENTOS HOSPITALARES LTDA")
+    f2 = fornecedor(comprador, "12.ABC.345/01DE-35", "BIOMED SERVICOS LTDA")
+    f3 = fornecedor(comprador, "45.723.174/0001-10", "LAGOA PRODUTOS HOSPITALARES LTDA")
+    for f, precos in ((f1, ["6400", "240"]), (f2, ["6100", "260"]), (f3, ["6900", "230"])):
+        assert proposta(comprador, sid, f, itens, precos).status_code == 201
+    d = comprador.get(f"/api/v1/solicitacoes/{sid}").get_json()
+    vencedora = d["comparacao"]["ranking"][0]
+    d = acao(comprador, sid, "definir_fornecedor", versao=d["solicitacao"]["versao"], cotacao_id=vencedora).get_json()
+    r = acao(comprador, sid, "emitir_pedido", versao=d["solicitacao"]["versao"])
+    assert r.status_code == 200, r.get_json()
+    return r.get_json(), r.get_json()["pedido_criado"]
 
 
 @pytest.fixture()

@@ -1,4 +1,4 @@
-"""RG Hospital — Plataforma corporativa de solicitações, aprovações e serviços programados."""
+"""Hospital Rio Grande · Compras — solicitações, aprovações, cotações, pedidos e recebimento."""
 from __future__ import annotations
 
 import atexit
@@ -16,10 +16,9 @@ from .seguranca.cabecalhos import aplicar_cabecalhos
 from .seguranca.cripto import cofre
 from .seguranca.sessao import carregar_contexto
 from .servicos.arquivos import armazenamento
-from .servicos.ocr import fila_ocr
 from .servicos.tempo_real import agendador, hub
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 
 def create_app(config: Config | None = None) -> Flask:
@@ -45,9 +44,6 @@ def create_app(config: Config | None = None) -> Flask:
     db.init_app(app)
     limiter.init_app(app)
     sock.init_app(app)
-    fila_ocr.configurar(habilitado=config.OCR_ENABLED, workers=config.OCR_WORKERS,
-                        max_paginas=config.OCR_MAX_PAGINAS, tesseract_cmd=config.TESSERACT_CMD,
-                        sincrono=getattr(config, "OCR_SINCRONO", False))
 
     registrar_handlers(app)
     app.before_request(carregar_contexto)
@@ -63,15 +59,10 @@ def create_app(config: Config | None = None) -> Flask:
         if config.REALTIME_ENABLED:
             hub.iniciar_escuta()
         agendador.iniciar(config.SLA_JOB_INTERVAL_SECONDS)
-        try:
-            fila_ocr.recuperar_pendentes()
-        except Exception:
-            logging.getLogger("rg").exception("Falha ao recuperar OCR pendente")
 
         def _encerrar():
             hub.parar()
             agendador.parar()
-            fila_ocr.encerrar()
             db.close()
         atexit.register(_encerrar)
 

@@ -1,8 +1,13 @@
 """Ambiente de desenvolvimento local em um comando (sem instalar PostgreSQL).
 
-    python dev.py                 # inicia PostgreSQL embutido, migra e sobe a API em http://127.0.0.1:8000
+    python dev.py                 # inicia PostgreSQL embutido, migra, carrega a demonstração e sobe em http://127.0.0.1:8000
     python dev.py --so-banco      # apenas prepara o banco e imprime a URL
     python dev.py --criar-admin   # cria o administrador inicial (interativo)
+    python dev.py --recriar       # apaga o banco de desenvolvimento e recria com dados de demonstração
+    python dev.py --sem-demo      # não carrega os dados fictícios de demonstração
+
+Para usar um PostgreSQL já instalado (em vez do embutido), defina RG_DEV_DATABASE_URL com um
+usuário superusuário, por exemplo: postgresql://postgres@localhost:5432/postgres
 
 Requer as dependências de desenvolvimento (requirements-dev.txt). Em produção, use um
 PostgreSQL gerenciado e `python -m rg.cli migrar` (ver README).
@@ -73,30 +78,72 @@ def obter_servidor(pgembed_mod, tentativas: int = 12):
     raise RuntimeError("O PostgreSQL de desenvolvimento não ficou pronto. Veja backend/.pgdata/log") from ultimo_erro
 
 
-def iniciar_banco() -> str:
+def _base_postgres() -> str:
+    externo = os.environ.get("RG_DEV_DATABASE_URL")
+    if externo:
+        return externo
     try:
         import pgembed
     except ImportError:
-        sys.exit("Instale as dependências de desenvolvimento: pip install -r requirements-dev.txt")
+        sys.exit("Instale as dependências de desenvolvimento (pip install -r requirements-dev.txt) "
+                 "ou defina RG_DEV_DATABASE_URL apontando para um PostgreSQL local.")
     import psycopg
     instalar_fusos(pgembed)
     DADOS_PG.mkdir(exist_ok=True)
     preparar_config_dev()
-    servidor = obter_servidor(pgembed)
-    base = servidor.get_uri()
+    base = obter_servidor(pgembed).get_uri()
     with psycopg.connect(base, autocommit=True) as c:
         if c.execute("show fsync").fetchone()[0] != "off":
             c.execute("alter system set fsync = off")
             c.execute("alter system set synchronous_commit = off")
             c.execute("select pg_reload_conf()")
-        if not c.execute("select 1 from pg_database where datname = 'rg_hospital'").fetchone():
-            c.execute("create database rg_hospital")
+    return base
+
+
+def _estrutura_antiga(c) -> bool:
+    """Bancos criados pela versão 1.x (sem pedidos de compra) precisam ser recriados."""
+    migrado = c.execute("select to_regclass('public.schema_migracoes') is not null").fetchone()[0]
+    return migrado and not c.execute("select to_regclass('rg.pedidos') is not null").fetchone()[0]
+
+
+def iniciar_banco(recriar: bool = False) -> str:
+    import psycopg
+    base = _base_postgres()
     url = base.rsplit("/", 1)[0] + "/rg_hospital"
+    with psycopg.connect(base, autocommit=True) as c:
+        existe = c.execute("select 1 from pg_database where datname = 'rg_hospital'").fetchone()
+        if existe and not recriar:
+            with psycopg.connect(url, autocommit=True) as alvo:
+                if _estrutura_antiga(alvo):
+                    print("Banco de desenvolvimento da versão anterior detectado: recriando com a nova estrutura.")
+                    recriar = True
+        if existe and recriar:
+            c.execute("select pg_terminate_backend(pid) from pg_stat_activity where datname = 'rg_hospital'")
+            c.execute("drop database rg_hospital")
+            existe = None
+        if not existe:
+            c.execute("create database rg_hospital")
     from rg.db import aplicar_migracoes
     aplicadas = aplicar_migracoes(url)
     if aplicadas:
         print("Migrações aplicadas:", ", ".join(aplicadas))
     return url
+
+
+def semear_demonstracao(url: str) -> None:
+    """Carrega os dados fictícios (uma única vez, em banco vazio)."""
+    import psycopg
+    from psycopg.rows import dict_row
+    from rg.config import Config
+    from rg.contas_teste import SENHA_TESTE
+    from rg.demo import semear_demo
+    from rg.seguranca import senhas
+    cfg = Config()
+    with psycopg.connect(url, row_factory=dict_row) as conn:
+        n = semear_demo(conn, segredo=cfg.SIGNATURE_SECRET, hash_senha=senhas.gerar_hash(SENHA_TESTE),
+                        termo_versao=cfg.LGPD_TERMO_VERSAO)
+    if n:
+        print(f"Dados de demonstração carregados: {n} solicitações fictícias. Senha dos perfis: {SENHA_TESTE}")
 
 
 def semear_contas_teste(app) -> None:
@@ -113,6 +160,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--so-banco", action="store_true")
     parser.add_argument("--criar-admin", action="store_true")
+    parser.add_argument("--recriar", action="store_true")
+    parser.add_argument("--sem-demo", action="store_true")
     parser.add_argument("--porta", type=int, default=int(os.environ.get("RG_PORTA", "8000")))
     args = parser.parse_args()
 
@@ -120,8 +169,10 @@ def main() -> None:
     garantir_env()
     from dotenv import load_dotenv
     load_dotenv(ARQUIVO_ENV)
-    url = iniciar_banco()
+    url = iniciar_banco(recriar=args.recriar)
     os.environ["RG_DATABASE_URL"] = url
+    if not args.sem_demo:
+        semear_demonstracao(url)
     print(f"PostgreSQL de desenvolvimento: {url}")
     if args.so_banco:
         return
@@ -132,7 +183,7 @@ def main() -> None:
     from rg import create_app
     app = create_app()
     semear_contas_teste(app)
-    print(f"RG Hospital em http://127.0.0.1:{args.porta}")
+    print(f"Hospital Rio Grande · Compras em http://127.0.0.1:{args.porta}")
     app.run(host="127.0.0.1", port=args.porta, threaded=True, use_reloader=False)
 
 

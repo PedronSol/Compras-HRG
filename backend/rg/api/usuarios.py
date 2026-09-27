@@ -1,4 +1,4 @@
-"""Gestão de usuários e setores (exclusivo da Administração)."""
+"""Gestão de usuários, perfis, setores e parâmetros (exclusivo do Administrador; Auditoria consulta)."""
 from __future__ import annotations
 
 import secrets
@@ -10,6 +10,8 @@ from ..db import db
 from ..errors import ApiError, NaoEncontrado, ValidacaoError
 from ..seguranca import senhas
 from ..seguranca.sessao import ip_cliente, registrar_evento, requer_papel, tx
+from ..permissoes import matriz
+from ..rotulos import PAPEL
 from ..validacao import Campo, validar
 from ._util import corpo_json, paginacao
 
@@ -34,8 +36,8 @@ def _validar_setor_papel(cur, papel: str, setor: str) -> None:
     s = cur.fetchone()
     if not s:
         raise ValidacaoError({"setor_codigo": "Setor inválido ou inativo"})
-    if papel == "gestor" and not s["operacional"]:
-        raise ValidacaoError({"setor_codigo": "Gestores devem pertencer a um setor operacional"})
+    if papel in ("gestor", "solicitante") and not s["operacional"]:
+        raise ValidacaoError({"setor_codigo": "Solicitantes e gestores devem pertencer a um setor que abre solicitações"})
 
 
 def _revogar_sessoes(usuario_id: str) -> None:
@@ -45,11 +47,11 @@ def _revogar_sessoes(usuario_id: str) -> None:
 
 
 @bp.get("/usuarios")
-@requer_papel("admin")
+@requer_papel("admin", "auditoria")
 def listar():
     filtros = validar(request.args.to_dict(), [
         Campo("status", "escolha", escolhas=("pendente", "aprovado", "rejeitado", "suspenso")),
-        Campo("papel", "escolha", escolhas=("admin", "gestor", "compras")),
+        Campo("papel", "escolha", escolhas=tuple(PAPEL)),
         Campo("setor", "texto", max_len=40),
         Campo("q", "texto", max_len=100),
     ])
@@ -80,15 +82,17 @@ def listar():
         itens = cur.fetchall()
         cur.execute("select status, count(*) as n from rg.usuarios group by status")
         contagem = {r["status"]: r["n"] for r in cur.fetchall()}
+        cur.execute("select papel, count(*) as n from rg.usuarios where status = 'aprovado' group by papel")
+        por_papel = {r["papel"]: r["n"] for r in cur.fetchall()}
     return jsonify({"itens": itens, "total": total, "pagina": pagina, "por_pagina": por_pagina,
-                    "contagem_status": contagem})
+                    "contagem_status": contagem, "por_papel": por_papel})
 
 
 @bp.post("/usuarios/<uuid:usuario_id>/aprovar")
 @requer_papel("admin")
 def aprovar(usuario_id):
     dados = validar(corpo_json(), [
-        Campo("papel", "escolha", obrigatorio=True, escolhas=("admin", "gestor", "compras"), rotulo="Perfil"),
+        Campo("papel", "escolha", obrigatorio=True, escolhas=tuple(PAPEL), rotulo="Perfil"),
         Campo("setor_codigo", "texto", obrigatorio=True, max_len=40, rotulo="Setor"),
     ])
     with tx() as cur:
@@ -123,7 +127,7 @@ def rejeitar(usuario_id):
 @requer_papel("admin")
 def atualizar(usuario_id):
     dados = validar(corpo_json(), [
-        Campo("papel", "escolha", escolhas=("admin", "gestor", "compras"), rotulo="Perfil"),
+        Campo("papel", "escolha", escolhas=tuple(PAPEL), rotulo="Perfil"),
         Campo("setor_codigo", "texto", max_len=40, rotulo="Setor"),
         Campo("status", "escolha", escolhas=("aprovado", "suspenso"), rotulo="Situação"),
         Campo("nome", "texto", min_len=3, max_len=120, rotulo="Nome"),
@@ -229,3 +233,33 @@ def atualizar_setor(codigo):
         if not setor:
             raise NaoEncontrado("Setor não encontrado")
     return jsonify(setor)
+
+
+@bp.get("/permissoes")
+@requer_papel("admin", "auditoria")
+def permissoes():
+    return jsonify({"matriz": matriz()})
+
+
+@bp.get("/configuracoes")
+@requer_papel("admin", "auditoria", "comprador", "financeiro", "diretoria")
+def listar_configuracoes():
+    with tx() as cur:
+        cur.execute("""select c.*, u.nome as atualizado_por_nome from rg.configuracoes c
+                         left join rg.v_usuarios_publico u on u.id = c.atualizado_por order by c.chave""")
+        return jsonify({"itens": cur.fetchall()})
+
+
+@bp.patch("/configuracoes/<chave>")
+@requer_papel("admin")
+def atualizar_configuracao(chave):
+    limites = {"alcada_diretoria": (0, 100_000_000), "minimo_cotacoes": (1, 10), "dias_alerta_entrega": (0, 30)}
+    if chave not in limites:
+        raise NaoEncontrado("Parâmetro inexistente")
+    minimo, maximo = limites[chave]
+    d = validar(corpo_json(), [Campo("valor", "decimal", obrigatorio=True, minimo=minimo, maximo=maximo, rotulo="Valor")])
+    with tx() as cur:
+        cur.execute("update rg.configuracoes set valor = %s where chave = %s returning *", (d["valor"], chave))
+        linha = cur.fetchone()
+        registrar_evento(cur, "PARAMETRO_ALTERADO", "rg.configuracoes", chave, {"valor": str(d["valor"])})
+    return jsonify(linha)

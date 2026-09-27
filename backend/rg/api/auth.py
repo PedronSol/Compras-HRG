@@ -118,7 +118,8 @@ def cadastro():
         Campo("nome", "texto", obrigatorio=True, min_len=3, max_len=120, rotulo="Nome completo"),
         Campo("email", "email", obrigatorio=True, rotulo="E-mail institucional"),
         Campo("setor_codigo", "texto", obrigatorio=True, max_len=40, rotulo="Setor"),
-        Campo("papel", "escolha", obrigatorio=True, escolhas=("gestor", "compras"), rotulo="Perfil de acesso"),
+        Campo("papel", "escolha", obrigatorio=True, escolhas=("solicitante", "gestor", "comprador", "financeiro", "recebimento"),
+              rotulo="Perfil de acesso"),
         Campo("cargo", "texto", max_len=80, rotulo="Cargo"),
         Campo("telefone", "texto", max_len=20, rotulo="Telefone"),
         Campo("senha", "texto", obrigatorio=True, max_len=128, rotulo="Senha"),
@@ -136,8 +137,8 @@ def cadastro():
         setor = cur.fetchone()
         if not setor:
             raise ValidacaoError({"setor_codigo": "Setor inválido"})
-        if dados["papel"] == "gestor" and not setor["operacional"]:
-            raise ValidacaoError({"setor_codigo": "Gestores devem pertencer a um setor assistencial ou operacional"})
+        if dados["papel"] in ("gestor", "solicitante") and not setor["operacional"]:
+            raise ValidacaoError({"setor_codigo": "Solicitantes e gestores devem pertencer a um setor que abre solicitações"})
         cur.execute("select 1 from rg.usuarios where lower(email) = %s", (dados["email"],))
         if cur.fetchone():
             registrar_evento(cur, "CADASTRO_DUPLICADO", "rg.usuarios", None)
@@ -277,7 +278,7 @@ def meus_dados():
         cur.execute("select ip, user_agent, criado_em, ultimo_acesso_em, revogada_em from rg.sessoes"
                     " where usuario_id = %s order by criado_em desc limit 200", (uid,))
         sessoes_ = cur.fetchall()
-        cur.execute("select codigo, titulo, status, criado_em from rg.solicitacoes where gestor_id = %s"
+        cur.execute("select codigo, titulo, status, criado_em from rg.solicitacoes where solicitante_id = %s"
                     " order by criado_em desc", (uid,))
         solicitacoes = cur.fetchall()
         cur.execute("""select s.codigo, a.acao, a.ip, a.assinado_em, a.hash_autenticidade

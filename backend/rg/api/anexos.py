@@ -1,4 +1,4 @@
-"""Download de anexos (decifrados sob demanda), resultados de OCR e remoção lógica."""
+"""Download de anexos (decifrados sob demanda) e remoção lógica. Nenhum conteúdo é lido automaticamente."""
 from __future__ import annotations
 
 from urllib.parse import quote
@@ -8,7 +8,6 @@ from flask import Blueprint, Response, g, jsonify, request
 from ..errors import ApiError, NaoEncontrado
 from ..seguranca.sessao import registrar_evento, requer_login, tx
 from ..servicos.arquivos import armazenamento
-from ..servicos.ocr import fila_ocr
 
 bp = Blueprint("anexos", __name__)
 
@@ -28,8 +27,6 @@ def detalhar(anexo_id):
     with tx() as cur:
         a = _obter(cur, str(anexo_id))
     a.pop("caminho", None)
-    if request.args.get("texto") != "1":
-        a.pop("ocr_texto", None)
     return jsonify(a)
 
 
@@ -53,18 +50,6 @@ def baixar(anexo_id):
     })
 
 
-@bp.post("/anexos/<uuid:anexo_id>/reprocessar-ocr")
-@requer_login
-def reprocessar(anexo_id):
-    with tx() as cur:
-        a = _obter(cur, str(anexo_id))
-        if a["removido_em"]:
-            raise ApiError("Anexo removido", 422, "anexo_removido")
-        registrar_evento(cur, "OCR_REPROCESSADO", "rg.anexos", str(anexo_id))
-    fila_ocr.enfileirar([str(anexo_id)])
-    return jsonify({"ok": True}), 202
-
-
 @bp.delete("/anexos/<uuid:anexo_id>")
 @requer_login
 def remover(anexo_id):
@@ -74,9 +59,8 @@ def remover(anexo_id):
             raise ApiError("Anexo já removido", 422, "anexo_removido")
         cur.execute("select 1 from rg.cotacoes where anexo_id = %s", (str(anexo_id),))
         if cur.fetchone():
-            raise ApiError("O documento está vinculado a uma cotação", 422, "anexo_vinculado")
-        cur.execute("update rg.anexos set removido_em = now(), removido_por = %s where id = %s",
-                    (g.usuario["id"], str(anexo_id)))
+            raise ApiError("O documento está vinculado a uma proposta", 422, "anexo_vinculado")
+        cur.execute("update rg.anexos set removido_em = now() where id = %s", (str(anexo_id),))
         if cur.rowcount != 1:
             raise ApiError("Você não pode remover este anexo nesta etapa", 403, "proibido")
     return jsonify({"ok": True})

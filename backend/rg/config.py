@@ -49,17 +49,15 @@ class Config:
         self.LOGIN_BLOQUEIO_MINUTOS = _int("RG_LOGIN_BLOQUEIO_MINUTOS", 15)
         self.SENHA_MIN_CARACTERES = _int("RG_SENHA_MIN_CARACTERES", 12)
         self.SENHA_HISTORICO = 5
-        self.HIBP_ENABLED = _bool("RG_HIBP_ENABLED", True)
+        # Consulta externa de senhas vazadas (Have I Been Pwned). Desligada por padrão: nenhum dado sai da
+        # infraestrutura do hospital sem decisão explícita da TI.
+        self.HIBP_ENABLED = _bool("RG_HIBP_ENABLED", False)
         self.HIBP_TIMEOUT = float(env("RG_HIBP_TIMEOUT", "3"))
 
         self.STORAGE_DIR = Path(env("RG_STORAGE_DIR", str(BASE_DIR / "storage")))
         self.MAX_UPLOAD_MB = _int("RG_MAX_UPLOAD_MB", 10)
-        self.MAX_CONTENT_LENGTH = (self.MAX_UPLOAD_MB * 3 + 1) * 1024 * 1024  # até 3 arquivos + campos
+        self.MAX_CONTENT_LENGTH = (self.MAX_UPLOAD_MB * 5 + 1) * 1024 * 1024  # até 5 arquivos + campos
 
-        self.OCR_ENABLED = _bool("RG_OCR_ENABLED", True)
-        self.OCR_WORKERS = _int("RG_OCR_WORKERS", 2)
-        self.OCR_MAX_PAGINAS = _int("RG_OCR_MAX_PAGINAS", 8)
-        self.TESSERACT_CMD = env("RG_TESSERACT_CMD", "")
 
         self.RATELIMIT_STORAGE_URI = env("RG_RATELIMIT_STORAGE_URI", "memory://")
         self.RATELIMIT_DEFAULT = env("RG_RATELIMIT_DEFAULT", "900 per minute")
@@ -75,6 +73,8 @@ class Config:
         self.TIMEZONE = env("RG_TIMEZONE", "America/Sao_Paulo")
         self.LGPD_TERMO_VERSAO = env("RG_LGPD_TERMO_VERSAO", "2026.1")
         self.INSTITUICAO = env("RG_INSTITUICAO", "Hospital Rio Grande")
+        # Ambiente de demonstração: exibe aviso de dados fictícios e o seletor de perfis de teste.
+        self.MODO_DEMO = _bool("RG_MODO_DEMO", self.AMBIENTE != "producao")
 
         for chave, valor in sobrescritas.items():
             setattr(self, chave, valor)
@@ -91,6 +91,8 @@ class Config:
             )
         if len(self.SECRET_KEY) < 32 or len(self.SIGNATURE_SECRET) < 32:
             raise ConfiguracaoInvalida("RG_SECRET_KEY e RG_SIGNATURE_SECRET devem ter ao menos 32 caracteres")
+        if self.AMBIENTE == "producao" and self.MODO_DEMO:
+            raise ConfiguracaoInvalida("RG_MODO_DEMO não pode ser usado em produção")
         if self.AMBIENTE == "producao" and not self.SESSION_COOKIE_SECURE:
             raise ConfiguracaoInvalida("Em produção o cookie de sessão deve ser Secure (HTTPS)")
 

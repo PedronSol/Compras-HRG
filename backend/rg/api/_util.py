@@ -75,3 +75,36 @@ def resposta_pdf(conteudo: bytes, nome: str, inline: bool = False) -> Response:
     disposicao = "inline" if inline else "attachment"
     return Response(conteudo, mimetype="application/pdf",
                     headers={"Content-Disposition": f'{disposicao}; filename="{nome}"'})
+
+
+def lista_itens(dados: dict, campos: list[Campo], campo: str = "itens", obrigatorio: bool = True) -> list[dict] | None:
+    """Lê uma lista de objetos (JSON ou string JSON em multipart) e valida cada item."""
+    import json
+    bruto = dados.get(campo)
+    if bruto is None or bruto == "":
+        if obrigatorio:
+            raise ValidacaoError({campo: "Inclua ao menos um item"})
+        return None
+    if isinstance(bruto, str):
+        try:
+            bruto = json.loads(bruto)
+        except ValueError:
+            raise ValidacaoError({campo: "Lista de itens inválida"}) from None
+    if not isinstance(bruto, list) or not all(isinstance(i, dict) for i in bruto):
+        raise ValidacaoError({campo: "Lista de itens inválida"})
+    if len(bruto) > 200:
+        raise ValidacaoError({campo: "Máximo de 200 itens"})
+    itens = []
+    for n, item in enumerate(bruto, start=1):
+        try:
+            itens.append(validar(item, campos))
+        except ValidacaoError as exc:
+            detalhe = "; ".join(exc.campos.values())
+            raise ValidacaoError({campo: f"Item {n}: {detalhe}"}) from None
+    if obrigatorio and not itens:
+        raise ValidacaoError({campo: "Inclua ao menos um item"})
+    return itens
+
+
+def like(termo: str) -> str:
+    return "%" + termo.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_") + "%"

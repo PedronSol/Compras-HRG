@@ -4,6 +4,7 @@
   python -m rg.cli migrar                  Aplica as migrações SQL pendentes
   python -m rg.cli criar-admin             Cria o primeiro administrador (interativo)
   python -m rg.cli rotacionar-chaves       Re-cifra dados com a chave ativa (após incluir nova chave)
+  python -m rg.cli semear-demo             Carrega dados fictícios de demonstração (banco vazio; nunca em produção)
 """
 from __future__ import annotations
 
@@ -88,6 +89,25 @@ def rotacionar_chaves() -> None:
     print(f"Dados re-cifrados com a chave ativa ({total} arquivos).")
 
 
+def semear_demo() -> None:
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from .config import Config
+    from .contas_teste import SENHA_TESTE
+    from .demo import semear_demo as semear
+    from .seguranca import senhas
+    cfg = Config()
+    if cfg.AMBIENTE == "producao":
+        sys.exit("Dados de demonstração não podem ser carregados em produção")
+    if not cfg.DATABASE_URL:
+        sys.exit("Defina RG_DATABASE_URL (usuário dono do schema)")
+    with psycopg.connect(cfg.DATABASE_URL, row_factory=dict_row) as conn:
+        n = semear(conn, segredo=cfg.SIGNATURE_SECRET, hash_senha=senhas.gerar_hash(SENHA_TESTE),
+                   termo_versao=cfg.LGPD_TERMO_VERSAO)
+    print(f"{n} solicitações fictícias criadas" if n else "O banco já possui dados; nada foi alterado")
+
+
 def main(argv: list[str] | None = None) -> None:
     load_dotenv()
     parser = argparse.ArgumentParser(prog="python -m rg.cli", description="RG Hospital — administração")
@@ -99,6 +119,7 @@ def main(argv: list[str] | None = None) -> None:
     p_admin.add_argument("--email")
     p_admin.add_argument("--setor", default="administracao")
     sub.add_parser("rotacionar-chaves")
+    sub.add_parser("semear-demo")
     args = parser.parse_args(argv)
     if args.comando == "gerar-chaves":
         gerar_chaves()
@@ -108,6 +129,8 @@ def main(argv: list[str] | None = None) -> None:
         import os
         os.environ.setdefault("RG_BACKGROUND_JOBS", "false")
         criar_admin(args.nome, args.email, args.setor)
+    elif args.comando == "semear-demo":
+        semear_demo()
     elif args.comando == "rotacionar-chaves":
         import os
         os.environ.setdefault("RG_BACKGROUND_JOBS", "false")
